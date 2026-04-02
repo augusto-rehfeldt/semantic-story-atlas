@@ -1,0 +1,12 @@
+# Core
+flask
+flask-cors
+sentence-transformers>=2.7.0
+numpy
+torch
+scikit-learn
+transformers>=4.51.0
+openai>=1.0.0
+
+# Optional (better 2D projections; falls back to PCA without it)
+umap-learn
