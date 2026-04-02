@@ -1,0 +1,125 @@
+<!-- frontend/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Story Atlas</title>
+    <link rel="stylesheet" href="styles.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Inter:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <!-- Status Message Banner -->
+    <div class="status-message" id="statusMessage"></div>
+
+    <div class="app-container">
+        <!-- Left Panel: Graph -->
+        <div class="graph-panel">
+            <div class="graph-container">
+                <canvas id="embeddingGraph"></canvas>
+                <div id="zoomIndicator" class="graph-zoom-indicator" aria-hidden="true">
+                    <span class="graph-mode-icon">🔎</span>
+                    <span class="graph-mode-text" id="zoomIndicatorText">100%</span>
+                    <span class="graph-mode-hint">dbl</span>
+                </div>
+                <div class="graph-legend">
+                    <div class="legend-item">
+                        <span class="legend-dot story-dot"></span>
+                        <span>Stories</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-dot query-dot"></span>
+                        <span>Your Query</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-dot selected-dot"></span>
+                        <span>Selected</span>
+                    </div>
+                </div>
+                <button id="viewModeToggle" class="graph-mode-toggle" type="button" aria-label="Toggle graph view mode">
+                    <span class="graph-mode-icon">🎯</span>
+                    <span class="graph-mode-text">Radial view</span>
+                    <span class="graph-mode-hint">V</span>
+                </button>
+            </div>
+            <div class="graph-info" id="graphInfo">
+                <div class="summary-empty">
+                    <div class="summary-kicker">Selected Story</div>
+                    <p>Click a point to inspect its title, author, series, and summary.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Search & Results -->
+        <div class="main-panel">
+            <header>
+                <h1>📚 Semantic Story Atlas</h1>
+                <p class="subtitle" id="librarySubtitle">Loading stories...</p>
+            </header>
+
+            <div class="search-container">
+                <div class="search-box">
+                    <input type="text" id="searchInput" placeholder="Describe what kind of story you're looking for..."
+                        autocomplete="off">
+                    <button id="searchBtn">
+                        <span class="search-icon">🔍</span>
+                        <span class="search-text">Search</span>
+                    </button>
+                </div>
+                <div class="search-options">
+                    <label>Animation Speed:</label>
+                    <select id="speedSelect">
+                        <option value="slow">Slow (Relaxed)</option>
+                        <option value="normal" selected>Normal</option>
+                        <option value="fast">Fast</option>
+                    </select>
+                </div>
+                <div class="search-hints">
+                    <span>Try:</span>
+                    <button class="hint-btn" data-query="a story about dragons and magic">dragons & magic</button>
+                    <button class="hint-btn" data-query="romance in a city setting">city romance</button>
+                    <button class="hint-btn" data-query="mystery and detective investigation">mystery detective</button>
+                    <button class="hint-btn" data-query="space exploration and aliens">space adventure</button>
+                    <button class="hint-btn" data-query="dark horror supernatural">horror</button>
+                </div>
+            </div>
+
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <span class="progress-text" id="progressText">Analyzing stories...</span>
+            </div>
+
+            <div class="stories-grid" id="storiesGrid">
+                <!-- Stories will be dynamically inserted here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Tooltip for graph -->
+    <div class="graph-tooltip" id="graphTooltip"></div>
+
+    <!-- Series Modal -->
+    <div class="series-modal-backdrop" id="seriesModalBackdrop" aria-hidden="true">
+        <div class="series-modal" role="dialog" aria-modal="true" aria-labelledby="seriesModalTitle">
+            <div class="series-modal-header">
+                <div>
+                    <div class="series-modal-kicker">Series Details</div>
+                    <h2 class="series-modal-title" id="seriesModalTitle">Series</h2>
+                    <div class="series-modal-subtitle" id="seriesModalSubtitle"></div>
+                </div>
+                <button class="series-modal-close" id="seriesModalClose" type="button" aria-label="Close series details">×</button>
+            </div>
+            <div class="series-modal-body" id="seriesModalBody"></div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,33 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Caches (regenerated automatically)
+**/embeddings_cache*.json
+**/projection_cache*.json
+
+# Model cache (downloaded automatically)
+.cache/
+
+# Stories
+stories/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Data - keep the folder structure but not generated stories
+# Uncomment the next line if you don't want to track your custom texts
+# stories/*.txt
