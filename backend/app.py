@@ -6,6 +6,8 @@ import time
 import threading
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 from flask import Flask, jsonify, request, Response, stream_with_context, send_from_directory, send_file
 from flask_cors import CORS
 from embeddings import EmbeddingsManager, build_cache_stem

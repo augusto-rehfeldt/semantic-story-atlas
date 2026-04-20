@@ -21,6 +21,13 @@ except ImportError:
     HAS_UMAP = False
     print("UMAP not available, falling back to PCA")
 
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    print("tqdm not available, progress bar disabled")
+
 
 _TORCH = None
 _SENTENCE_TRANSFORMER = None
@@ -260,18 +267,23 @@ class EmbeddingsManager:
             batch_size = max(1, self.max_batch_size)
             total_batches = (len(cleaned_texts) + batch_size - 1) // batch_size
 
+            pbar = tqdm(total=total_batches, desc="Encoding via LM Studio") if HAS_TQDM else None
             for batch_index in range(0, len(cleaned_texts), batch_size):
                 batch = cleaned_texts[batch_index : batch_index + batch_size]
-                batch_number = (batch_index // batch_size) + 1
                 self._emit_status(
                     f"Encoding {len(batch)} texts via LM Studio "
-                    f"(batch {batch_number}/{total_batches})..."
+                    f"(batch {(batch_index // batch_size) + 1}/{total_batches})..."
                 )
                 response = self.model.embeddings.create(
                     input=batch,
                     model=self.model_name,
                 )
                 embeddings.extend(item.embedding for item in response.data)
+                if pbar:
+                    pbar.update(1)
+
+            if pbar:
+                pbar.close()
 
             return np.array(embeddings, dtype=np.float32)
 
