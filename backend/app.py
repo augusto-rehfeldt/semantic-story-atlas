@@ -4,10 +4,31 @@ import os
 import json
 import time
 import threading
+import logging
 from datetime import datetime
 from flask import Flask, jsonify, request, Response, stream_with_context, send_from_directory, send_file
 from flask_cors import CORS
 from embeddings import EmbeddingsManager, build_cache_stem
+
+
+# Suppress verbose Werkzeug request logs for health checks
+class HealthCheckFilter(logging.Filter):
+    """Filter out health check request logs."""
+
+    def filter(self, record):
+        if not hasattr(record, 'msg') or not isinstance(record.msg, str):
+            return True
+        # Filter out health check GET requests
+        if 'GET /api/health' in record.msg:
+            return False
+        return True
+
+
+# Apply filter to Werkzeug logger
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.addFilter(HealthCheckFilter())
+# Set logging level to WARNING to reduce noise, but keep INFO for startup messages
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 # Serve frontend static files
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
