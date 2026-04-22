@@ -24,7 +24,15 @@ function normalizeSeriesKey(series, author = '') {
 }
 
 function getStoryAuthor(story) {
-    return (story?.author || story?.authors || '').trim();
+  return (story?.author || story?.authors || '').trim();
+}
+
+function formatAuthors(authorStr, max = 2) {
+  if (!authorStr) return '';
+  const separators = /[,;&]|\band\b/i;
+  const authors = authorStr.split(separators).map(a => a.trim()).filter(Boolean);
+  if (authors.length <= max) return authors.join(', ');
+  return authors.slice(0, max).join(', ') + ', \u2026';
 }
 
 function parseSeriesIndex(value) {
@@ -354,7 +362,7 @@ let viewMode = 'radial'; // 'fixed' or 'radial'
 let graphVisualScale = 1;
 
 // Animation state
-let animationDuration = 540; // ms per dot - smoother per-story transition
+let animationDuration = 180;
 
 // Pan and zoom state
 let panOffsetX = 0;
@@ -367,22 +375,56 @@ let panStartOffsetX = 0;
 let panStartOffsetY = 0;
 
 // DOM Elements
-let searchInput, searchBtn, speedSelect, storiesGrid, progressContainer;
+let searchInput, searchBtn, storiesGrid, progressContainer;
 let progressFill, progressText, hintButtons, graphInfo, graphTooltip, statusMessage;
 let librarySubtitle;
 let viewModeToggle;
 let zoomIndicator, zoomIndicatorText;
 let seriesModalBackdrop, seriesModalClose, seriesModalTitle, seriesModalSubtitle, seriesModalBody;
 let activeSeriesStoryId = null;
+let settingsToggleBtn, settingsModalBackdrop, settingsModalClose, settingsSaveBtn, settingsResetBtn;
+let settingMaxCards;
+let cardObserver = null;
+const CARD_RENDER_MARGIN = '600px';
+
+const SETTINGS_DEFAULTS = { maxCards: 100 };
+let appSettings = { ...SETTINGS_DEFAULTS };
+
+function loadSettings() {
+  try {
+    const saved = localStorage.getItem('storyAtlasSettings');
+    if (saved) appSettings = { ...SETTINGS_DEFAULTS, ...JSON.parse(saved) };
+  } catch (_) {}
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem('storyAtlasSettings', JSON.stringify(appSettings));
+  } catch (_) {}
+}
+
+function getVisibleGraphStories() {
+  return allStories;
+}
+
+function getVisibleCardStories() {
+  if (currentResults.size > 0) {
+    const sorted = Array.from(currentResults.values()).sort((a, b) => b.similarity - a.similarity);
+    const topIds = new Set(sorted.slice(0, appSettings.maxCards).map(r => r.id));
+    return allStories.filter(s => topIds.has(s.id));
+  }
+  return allStories.length <= appSettings.maxCards
+    ? allStories
+    : allStories.slice(0, appSettings.maxCards);
+}
 
 // Initialize
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
     searchInput = document.getElementById('searchInput');
-    searchBtn = document.getElementById('searchBtn');
-    speedSelect = document.getElementById('speedSelect');
-    storiesGrid = document.getElementById('storiesGrid');
+  searchBtn = document.getElementById('searchBtn');
+  storiesGrid = document.getElementById('storiesGrid');
     progressContainer = document.getElementById('progressContainer');
     progressFill = document.getElementById('progressFill');
     progressText = document.getElementById('progressText');
@@ -398,9 +440,17 @@ async function init() {
     seriesModalClose = document.getElementById('seriesModalClose');
     seriesModalTitle = document.getElementById('seriesModalTitle');
     seriesModalSubtitle = document.getElementById('seriesModalSubtitle');
-    seriesModalBody = document.getElementById('seriesModalBody');
+  seriesModalBody = document.getElementById('seriesModalBody');
 
-    initGraph();
+  loadSettings();
+  settingsToggleBtn = document.getElementById('settingsToggleBtn');
+  settingsModalBackdrop = document.getElementById('settingsModalBackdrop');
+  settingsModalClose = document.getElementById('settingsModalClose');
+  settingsSaveBtn = document.getElementById('settingsSaveBtn');
+  settingsResetBtn = document.getElementById('settingsResetBtn');
+  settingMaxCards = document.getElementById('settingMaxCards');
+
+  initGraph();
     await loadStories();
     setupEventListeners();
     setupModalListeners();
@@ -456,12 +506,13 @@ function initGraph() {
         isPanning = false;
         graphCanvas.style.cursor = 'crosshair';
     });
-    window.addEventListener('mousemove', (e) => {
-        if (isPanning) {
-            panOffsetX = panStartOffsetX + (e.clientX - panStartX);
-            panOffsetY = panStartOffsetY + (e.clientY - panStartY);
-        }
-    });
+  window.addEventListener('mousemove', (e) => {
+    if (isPanning) {
+      panOffsetX = panStartOffsetX + (e.clientX - panStartX);
+      panOffsetY = panStartOffsetY + (e.clientY - panStartY);
+      markGraphDirty();
+    }
+  });
 
     // Zoom: scroll wheel
     graphCanvas.addEventListener('wheel', (e) => {
@@ -477,40 +528,55 @@ function initGraph() {
         panOffsetX = mouseX - (mouseX - panOffsetX) * (newZoom / zoomLevel);
         panOffsetY = mouseY - (mouseY - panOffsetY) * (newZoom / zoomLevel);
 
-        zoomLevel = newZoom;
-    }, { passive: false });
+    zoomLevel = newZoom;
+    markGraphDirty();
+  }, { passive: false });
 
-    // Double-click to reset pan/zoom
-    graphCanvas.addEventListener('dblclick', () => {
-        panOffsetX = 0;
-        panOffsetY = 0;
-        zoomLevel = 1;
-    });
+  graphCanvas.addEventListener('dblclick', () => {
+    panOffsetX = 0;
+    panOffsetY = 0;
+    zoomLevel = 1;
+    markGraphDirty();
+  });
 }
 
 function resizeGraph() {
-    const container = graphCanvas.parentElement;
-    const rect = container.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    graphCanvas.style.width = `${rect.width}px`;
-    graphCanvas.style.height = `${rect.height}px`;
-    graphCanvas.width = Math.round(rect.width * dpr);
-    graphCanvas.height = Math.round(rect.height * dpr);
-    graphCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const container = graphCanvas.parentElement;
+  const rect = container.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  graphCanvas.style.width = `${rect.width}px`;
+  graphCanvas.style.height = `${rect.height}px`;
+  graphCanvas.width = Math.round(rect.width * dpr);
+  graphCanvas.height = Math.round(rect.height * dpr);
+  graphCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  markGraphDirty();
+}
+
+let graphDirty = true;
+
+function markGraphDirty() {
+  graphDirty = true;
 }
 
 function startGraphAnimation() {
-    let lastTime = 0;
+  let lastTime = 0;
 
-    function animate(currentTime) {
-        lastTime = currentTime;
+  function animate(currentTime) {
+    lastTime = currentTime;
 
-        updateStoryAnimations(currentTime);
+    updateStoryAnimations(currentTime);
 
-        drawGraph();
-        animationFrameId = requestAnimationFrame(animate);
+    if (storyMotionStates.size > 0) graphDirty = true;
+    if (queryPosition) graphDirty = true;
+
+    if (graphDirty) {
+      drawGraph();
+      graphDirty = storyMotionStates.size > 0 || queryPosition;
     }
-    animate(0);
+
+    animationFrameId = requestAnimationFrame(animate);
+  }
+  animate(0);
 }
 
 function lerp(a, b, t) {
@@ -628,17 +694,44 @@ function drawGraph() {
         });
     }
 
-    // Separate selected story to draw last (on top)
-    let selectedStory = null;
+  let selectedStory = null;
+  const resultStories = [];
 
-    // Draw NON-selected story points first
-    allStories.forEach(story => {
-        if (story.id === selectedStoryId) {
-            selectedStory = story;
-            return;
-        }
-        drawStoryPoint(story, width, height, padding, false, overlayAnnotations);
-    });
+  const defaultRadius = 4.5 * graphVisualScale;
+  const defaultColor = 'rgba(100, 116, 139, 0.95)';
+  const defaultStroke = 'rgba(148, 163, 184, 0.65)';
+  const defaultLineWidth = 1.2 * graphVisualScale;
+
+  // Batch-draw non-result dots (one path, one fill, one stroke)
+  graphCtx.fillStyle = defaultColor;
+  graphCtx.strokeStyle = defaultStroke;
+  graphCtx.lineWidth = defaultLineWidth;
+  graphCtx.beginPath();
+
+  allStories.forEach(story => {
+    if (story.id === selectedStoryId) { selectedStory = story; return; }
+    if (currentResults.has(story.id)) { resultStories.push(story); return; }
+    const pos = storyPositions.get(story.id);
+    if (!pos) return;
+    let x, y;
+    if (viewMode === 'radial') {
+      x = scale.centerX + pos.x * scale.radius;
+      y = scale.centerY + pos.y * scale.radius;
+    } else {
+      x = mapToCanvas(pos.x, width, padding);
+      y = mapToCanvas(pos.y, height, padding, true);
+    }
+    graphCtx.moveTo(x + defaultRadius, y);    graphCtx.arc(x, y, defaultRadius, 0, Math.PI * 2);
+  });
+
+  graphCtx.fill();
+  graphCtx.stroke();
+
+  // Draw result dots with full styling (colored, sized by similarity)
+  resultStories.forEach(story => {
+    if (story.id === selectedStoryId) { selectedStory = story; return; }
+    drawStoryPoint(story, width, height, padding, false, overlayAnnotations);
+  });
 
     // Draw query point / center
     if (queryPosition) {
@@ -996,11 +1089,10 @@ function handleGraphMouseMove(e) {
         }
     }
 
-    // Find closest story point
-    let closestStory = null;
-    let closestDist = Infinity;
+  let closestStory = null;
+  let closestDist = Infinity;
 
-    allStories.forEach(story => {
+  allStories.forEach(story => {
         const pos = storyPositions.get(story.id);
         if (!pos) return;
 
@@ -1049,10 +1141,10 @@ function handleGraphClick(e) {
     const height = graphCanvas.clientHeight;
     const scale = getRadialScale(width, height, padding);
 
-    let clickedStory = null;
-    let closestDist = Infinity;
+  let clickedStory = null;
+  let closestDist = Infinity;
 
-    allStories.forEach(story => {
+  allStories.forEach(story => {
         const pos = storyPositions.get(story.id);
         if (!pos) return;
 
@@ -1107,17 +1199,19 @@ function selectStory(storyId, options = {}) {
         series: story ? story.series : null,
     });
     renderGraphSummary(story, result);
+  markGraphDirty();
 }
 
 function deselectStory() {
-    if (selectedStoryId) {
-        const prevCard = storyElements.get(selectedStoryId);
-        if (prevCard) {
-            prevCard.classList.remove('selected');
-        }
-        selectedStoryId = null;
-        renderGraphSummary(null, null);
+  if (selectedStoryId) {
+    const prevCard = storyElements.get(selectedStoryId);
+    if (prevCard) {
+      prevCard.classList.remove('selected');
     }
+    selectedStoryId = null;
+    renderGraphSummary(null, null);
+    markGraphDirty();
+  }
 }
 
 function renderGraphSummary(story, result) {
@@ -1158,7 +1252,7 @@ function renderGraphSummary(story, result) {
                     <div class="summary-title-block">
                         <div class="summary-kicker">Selected Story</div>
                         <div class="summary-title">${story.title}</div>
-                        ${author ? `<div class="summary-author">by ${author}</div>` : ''}
+                        ${author ? `<div class="summary-author">by ${formatAuthors(author)}</div>` : ''}
                         <div class="summary-meta">${metaParts.join(' ')}</div>
                     </div>
                 </div>
@@ -1210,8 +1304,9 @@ function toggleViewMode() {
         return;
     }
 
-    viewMode = viewMode === 'fixed' ? 'radial' : 'fixed';
-    animateStoriesToCurrentView(10);
+  viewMode = viewMode === 'fixed' ? 'radial' : 'fixed';
+  animateStoriesToCurrentView(10);
+  markGraphDirty();
 
     const modeText = viewMode === 'fixed'
         ? 'Fixed positions (true embedding space)'
@@ -1285,10 +1380,14 @@ async function loadStories() {
             return;
         }
 
-        allStories = data.stories;
-        if (librarySubtitle) {
-            librarySubtitle.textContent = `Browse ${(data.count || 0).toLocaleString()} books by semantic similarity`;
-        }
+  allStories = data.stories;
+  if (librarySubtitle) {
+    const total = (data.count || 0).toLocaleString();
+    const showing = getVisibleCardStories().length.toLocaleString();
+    librarySubtitle.textContent = allStories.length > appSettings.maxCards
+      ? `Showing top ${showing} of ${total} books`
+      : `Browse ${total} books by semantic similarity`;
+  }
         document.title = `Semantic Story Atlas • ${(data.count || 0).toLocaleString()} books`;
 
         // Store positions
@@ -1306,7 +1405,7 @@ async function loadStories() {
         setTimeout(hideStatus, 3000);
 
         renderGraphSummary(null, null);
-        renderStories(allStories);
+        renderStories(getVisibleCardStories());
     } catch (error) {
         console.error('[LOAD] Failed to load stories:', error);
         showStatus('❌ Failed to connect to server. Make sure backend is running.', 'error');
@@ -1319,44 +1418,70 @@ async function loadStories() {
     }
 }
 
-function renderStories(stories, withAnimation = true) {
-    storiesGrid.innerHTML = '';
-    storyElements.clear();
-    groupElements.clear();
-    storyToGroupId.clear();
-    displayGroups = buildDisplayGroups(stories);
-
-    displayGroups.forEach((group, index) => {
-        const card = group.type === 'series'
-            ? createSeriesGroupCard(group, index)
-            : createStoryCard(group.members[0], index);
-        storiesGrid.appendChild(card);
-        groupElements.set(group.id, card);
-        group.members.forEach(story => {
-            storyElements.set(story.id, card);
-        });
-
-        if (withAnimation) {
-            setTimeout(() => {
-                card.classList.add('visible');
-            }, index * 30);
+function setupCardObserver() {
+  if (cardObserver) cardObserver.disconnect();
+  cardObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const card = entry.target;
+        const groupId = card.dataset.groupId;
+        const group = displayGroups.find(g => g.id === groupId);
+        if (!group) return;
+        if (group.type === 'series') {
+          renderSeriesGroupCard(card, group, group.firstIndex);
         } else {
-            card.classList.add('visible');
+          renderSingleStoryCard(card, group.members[0], group.firstIndex);
         }
+        card.classList.add('rendered');
+        cardObserver.unobserve(card);
+      }
     });
+  }, { rootMargin: CARD_RENDER_MARGIN });
+}
+
+function renderStories(stories, withAnimation = true) {
+  storiesGrid.innerHTML = '';
+  storyElements.clear();
+  groupElements.clear();
+  storyToGroupId.clear();
+  displayGroups = buildDisplayGroups(stories);
+  setupCardObserver();
+
+  displayGroups.forEach((group, index) => {
+    const card = group.type === 'series'
+      ? createSeriesGroupCard(group, index)
+      : createStoryCard(group.members[0], index);
+    card.dataset.groupId = group.id;
+    storiesGrid.appendChild(card);
+    groupElements.set(group.id, card);
+    group.members.forEach(story => {
+      storyElements.set(story.id, card);
+    });
+
+    cardObserver.observe(card);
+
+    if (withAnimation) {
+      setTimeout(() => {
+        card.classList.add('visible');
+      }, Math.min(index, 60) * 30);
+    } else {
+      card.classList.add('visible');
+    }
+  });
 }
 
 function refreshGroupCardForStory(storyId) {
-    const groupId = getStoryDisplayGroupId(storyId);
-    const group = displayGroups.find(item => item.id === groupId);
-    const card = groupElements.get(groupId);
-    if (!group || !card) return;
+  const groupId = getStoryDisplayGroupId(storyId);
+  const group = displayGroups.find(item => item.id === groupId);
+  const card = groupElements.get(groupId);
+  if (!group || !card) return;
 
-    if (group.type === 'series') {
-        renderSeriesGroupCard(card, group, group.firstIndex);
-    } else {
-        renderSingleStoryCard(card, group.members[0], group.firstIndex);
-    }
+  if (group.type === 'series') {
+    renderSeriesGroupCard(card, group, group.firstIndex);
+  } else {
+    renderSingleStoryCard(card, group.members[0], group.firstIndex);
+  }
+  card.classList.add('rendered');
 }
 
 function renderSingleStoryCard(card, story, index) {
@@ -1381,7 +1506,7 @@ function renderSingleStoryCard(card, story, index) {
             <div class="story-card-overlay">
                 <div class="story-card-overlay-header">
                     <h3 class="story-title">${story.title}</h3>
-                    ${getStoryAuthor(story) ? `<div class="story-author">by ${getStoryAuthor(story)}</div>` : ''}
+                    ${getStoryAuthor(story) ? `<div class="story-author">by ${formatAuthors(getStoryAuthor(story))}</div>` : ''}
                 </div>
                 <p class="story-excerpt">${excerptText || 'No summary available.'}</p>
                 <div class="story-meta">
@@ -1408,23 +1533,26 @@ function renderSingleStoryCard(card, story, index) {
         }
     }
 
-    if (story.id === selectedStoryId) {
-        card.classList.add('selected');
-    }
-    if (wasVisible) {
-        card.classList.add('visible');
-    }
+  if (story.id === selectedStoryId) {
+    card.classList.add('selected');
+  }
+  if (wasVisible) {
+    card.classList.add('visible');
+  }
+  card.classList.add('rendered');
 }
 
 function createStoryCard(story, index) {
-    const card = document.createElement('div');
-    renderSingleStoryCard(card, story, index);
+  const card = document.createElement('div');
+  card.className = 'story-card';
+  card.dataset.id = story.id;
+  card.innerHTML = '<div class="story-card-visual"><div class="story-card-overlay"><div class="story-card-overlay-header"><h3 class="story-title story-title-placeholder"></h3></div></div></div>';
 
-    card.onclick = () => {
-        selectStory(story.id, { force: true, source: 'story-card' });
-    };
+  card.onclick = () => {
+    selectStory(story.id, { force: true, source: 'story-card' });
+  };
 
-    return card;
+  return card;
 }
 
 function renderSeriesGroupCard(card, group, index) {
@@ -1458,7 +1586,7 @@ function renderSeriesGroupCard(card, group, index) {
                     <div class="story-group-title-block">
                         <div class="story-kicker">Series</div>
                         <h3 class="story-title">${group.title}</h3>
-                        ${group.author ? `<div class="story-author">by ${group.author}</div>` : ''}
+                        ${group.author ? `<div class="story-author">by ${formatAuthors(group.author)}</div>` : ''}
                     </div>
                     ${bestResult ? `
                         <div class="summary-stats">
@@ -1506,14 +1634,17 @@ function renderSeriesGroupCard(card, group, index) {
         const targetStoryId = topMember ? topMember.id : group.members[0]?.id;
         if (!targetStoryId) return;
 
-        selectStory(targetStoryId, { force: true, source: 'series-card' });
-    };
+  selectStory(targetStoryId, { force: true, source: 'series-card' });
+  };
+  card.classList.add('rendered');
 }
 
 function createSeriesGroupCard(group, index) {
-    const card = document.createElement('div');
-    renderSeriesGroupCard(card, group, index);
-    return card;
+  const card = document.createElement('div');
+  card.className = 'story-card story-group-card';
+  card.dataset.id = group.id;
+  card.innerHTML = '<div class="story-card-visual story-group-visual"><div class="story-card-overlay story-group-overlay"><div class="story-group-top"><div class="story-group-title-block"><h3 class="story-title story-title-placeholder"></h3></div></div></div></div>';
+  return card;
 }
 
 // ==================== SEARCH ====================
@@ -1535,11 +1666,12 @@ function setupEventListeners() {
         viewModeToggle.addEventListener('click', toggleViewMode);
     }
 
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-            closeSeriesModal();
-            deselectStory();
-        }
+  document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeSettingsModal();
+    closeSeriesModal();
+    deselectStory();
+  }
         if ((e.key === 'v' || e.key === 'V') && !e.ctrlKey && !e.metaKey) {
             if (document.activeElement !== searchInput) {
                 toggleViewMode();
@@ -1549,17 +1681,35 @@ function setupEventListeners() {
 }
 
 function setupModalListeners() {
-    if (seriesModalClose) {
-        seriesModalClose.addEventListener('click', closeSeriesModal);
-    }
+  if (seriesModalClose) {
+    seriesModalClose.addEventListener('click', closeSeriesModal);
+  }
 
-    if (seriesModalBackdrop) {
-        seriesModalBackdrop.addEventListener('click', (event) => {
-            if (event.target === seriesModalBackdrop) {
-                closeSeriesModal();
-            }
-        });
-    }
+  if (seriesModalBackdrop) {
+    seriesModalBackdrop.addEventListener('click', (event) => {
+      if (event.target === seriesModalBackdrop) {
+        closeSeriesModal();
+      }
+    });
+  }
+
+  if (settingsToggleBtn) {
+    settingsToggleBtn.addEventListener('click', openSettingsModal);
+  }
+  if (settingsModalClose) {
+    settingsModalClose.addEventListener('click', closeSettingsModal);
+  }
+  if (settingsModalBackdrop) {
+    settingsModalBackdrop.addEventListener('click', (event) => {
+      if (event.target === settingsModalBackdrop) closeSettingsModal();
+    });
+  }
+  if (settingsSaveBtn) {
+    settingsSaveBtn.addEventListener('click', applySettings);
+  }
+  if (settingsResetBtn) {
+    settingsResetBtn.addEventListener('click', resetSettings);
+  }
 }
 
 function refreshSeriesModalIfOpen() {
@@ -1600,9 +1750,9 @@ function renderSeriesModal(story) {
 
     seriesModalTitle.textContent = story.series || 'Series';
     const seriesAuthor = getStoryAuthor(story);
-    seriesModalSubtitle.textContent = seriesAuthor
-        ? `by ${seriesAuthor} · ${allSeriesStories.length} books`
-        : `${allSeriesStories.length} books in this series`;
+  seriesModalSubtitle.textContent = seriesAuthor
+    ? `by ${formatAuthors(seriesAuthor)} · ${allSeriesStories.length} books`
+    : `${allSeriesStories.length} books in this series`;
 
     const leadResult = currentResults.get(story.id);
     const leadScore = leadResult ? `${(leadResult.similarity * 100).toFixed(1)}%` : '—';
@@ -1642,11 +1792,51 @@ function renderSeriesModal(story) {
 }
 
 function closeSeriesModal() {
-    if (!seriesModalBackdrop) return;
-    seriesModalBackdrop.classList.remove('visible');
-    seriesModalBackdrop.setAttribute('aria-hidden', 'true');
-    document.body.classList.remove('modal-open');
-    activeSeriesStoryId = null;
+  if (!seriesModalBackdrop) return;
+  seriesModalBackdrop.classList.remove('visible');
+  seriesModalBackdrop.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('modal-open');
+  activeSeriesStoryId = null;
+}
+
+function openSettingsModal() {
+  if (!settingsModalBackdrop) return;
+  if (settingMaxCards) settingMaxCards.value = appSettings.maxCards;
+  settingsModalBackdrop.classList.add('visible');
+  settingsModalBackdrop.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('modal-open');
+}
+
+function closeSettingsModal() {
+  if (!settingsModalBackdrop) return;
+  settingsModalBackdrop.classList.remove('visible');
+  settingsModalBackdrop.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('modal-open');
+}
+
+function applySettings() {
+  const newMaxCards = parseInt(settingMaxCards?.value, 10);
+  if (Number.isFinite(newMaxCards) && newMaxCards >= 10) appSettings.maxCards = newMaxCards;
+  saveSettings();
+  closeSettingsModal();
+  storyMotionStates.clear();
+  renderStories(getVisibleCardStories());
+  animateStoriesToCurrentView(5);
+  markGraphDirty();
+  if (librarySubtitle && allStories.length) {
+    const total = allStories.length.toLocaleString();
+    const showing = getVisibleCardStories().length.toLocaleString();
+    librarySubtitle.textContent = allStories.length > appSettings.maxCards
+      ? `Showing top ${showing} of ${total} books`
+      : `Browse ${total} books by semantic similarity`;
+  }
+  showStatus(`Settings applied — showing up to ${appSettings.maxCards} cards`, 'success');
+  setTimeout(hideStatus, 2500);
+}
+
+function resetSettings() {
+  appSettings = { ...SETTINGS_DEFAULTS };
+  if (settingMaxCards) settingMaxCards.value = SETTINGS_DEFAULTS.maxCards;
 }
 
 async function performSearch() {
@@ -1657,7 +1847,7 @@ async function performSearch() {
         return;
     }
 
-    const speed = speedSelect ? speedSelect.value : 'normal';
+    const speed = 'fast';
 
     console.log(`[SEARCH] Starting search for: "${query}"`);
 
@@ -1666,11 +1856,12 @@ async function performSearch() {
     progressText.textContent = 'Encoding query...';
     showStatus('🔍 Encoding your query into embedding space...', 'info');
 
-    // Reset state
-    currentResults.clear();
-    queryPosition = null;
-    selectedStoryId = null;
-    viewMode = 'radial'; // Default to radial view for new searches
+  // Reset state
+  currentResults.clear();
+  queryPosition = null;
+  selectedStoryId = null;
+  viewMode = 'radial';
+  markGraphDirty();
     panOffsetX = 0;
     panOffsetY = 0;
     zoomLevel = 1;
@@ -1716,10 +1907,11 @@ async function performSearch() {
                 const data = JSON.parse(event.data);
                 console.log('[SEARCH] Received event:', data.type);
 
-                if (data.type === 'query_position') {
-                    console.log('[SEARCH] Query position:', data.position);
-                    queryPosition = data.position;
-                    showStatus('📍 Query projected to embedding space', 'info');
+    if (data.type === 'query_position') {
+      console.log('[SEARCH] Query position:', data.position);
+      queryPosition = data.position;
+      markGraphDirty();
+      showStatus('📍 Query projected to embedding space', 'info');
                 } else if (data.type === 'update') {
                     handleStreamUpdate(data);
                 } else if (data.type === 'complete') {
@@ -1786,11 +1978,12 @@ function handleStreamUpdate(data) {
         setTimeout(() => card.classList.remove('pulse'), 1000);
     }
 
-    reorderCards();
+  reorderCards();
+  markGraphDirty();
 }
 
 function reorderCards() {
-    const sortedGroups = [...displayGroups].sort((a, b) => {
+  const sortedGroups = [...displayGroups].sort((a, b) => {
         const aValue = getGroupSortValue(a);
         const bValue = getGroupSortValue(b);
         if (aValue !== bValue) {
@@ -1840,24 +2033,33 @@ function handleStreamComplete(data) {
 
     });
 
-    displayGroups.forEach(group => refreshGroupCardForStory(group.members[0].id));
-    reorderCards();
-    refreshSeriesModalIfOpen();
+  displayGroups.forEach(group => refreshGroupCardForStory(group.members[0].id));
+  reorderCards();
+  refreshSeriesModalIfOpen();
+  animateStoriesToCurrentView(5);
+  if (librarySubtitle && allStories.length) {
+    const total = allStories.length.toLocaleString();
+    const showing = getVisibleCardStories().length.toLocaleString();
+    librarySubtitle.textContent = allStories.length > appSettings.maxCards
+      ? `Showing top ${showing} of ${total} books`
+      : `Browse ${total} books by semantic similarity`;
+  }
 
-    // Set query position
-    if (data.query_position) {
-        console.log('[SEARCH] Final query position:', data.query_position);
-        queryPosition = data.query_position;
-    }
+  // Set query position
+  if (data.query_position) {
+    console.log('[SEARCH] Final query position:', data.query_position);
+    queryPosition = data.query_position;
+    markGraphDirty();
+  }
 
 }
 
 function animateStoriesToCurrentView(staggerMs = 0) {
-    allStories.forEach((story, index) => {
-        const targetPosition = viewMode === 'radial'
-            ? radialPositions.get(story.id)
-            : originalPositions.get(story.id);
-        if (!targetPosition) return;
-        queueStoryPositionAnimation(story.id, targetPosition, index * staggerMs);
-    });
+  allStories.forEach((story, index) => {
+    const targetPosition = viewMode === 'radial'
+      ? radialPositions.get(story.id)
+      : originalPositions.get(story.id);
+    if (!targetPosition) return;
+    queueStoryPositionAnimation(story.id, targetPosition, index * staggerMs);
+  });
 }

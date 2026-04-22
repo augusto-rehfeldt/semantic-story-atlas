@@ -56,29 +56,21 @@
 
         <!-- Right Panel: Search & Results -->
         <div class="main-panel">
-            <header>
-                <h1>📚 Semantic Story Atlas</h1>
-                <p class="subtitle" id="librarySubtitle">Loading stories...</p>
-            </header>
+  <header>
+    <h1>📚 Semantic Story Atlas</h1>
+    <p class="subtitle" id="librarySubtitle">Loading stories...</p>
+    <button class="settings-toggle-btn" id="settingsToggleBtn" type="button" aria-label="Open settings">⚙️</button>
+  </header>
 
             <div class="search-container">
-                <div class="search-box">
-                    <input type="text" id="searchInput" placeholder="Describe what kind of story you're looking for..."
-                        autocomplete="off">
-                    <button id="searchBtn">
-                        <span class="search-icon">🔍</span>
-                        <span class="search-text">Search</span>
-                    </button>
-                </div>
-                <div class="search-options">
-                    <label>Animation Speed:</label>
-                    <select id="speedSelect">
-                        <option value="slow">Slow (Relaxed)</option>
-                        <option value="normal" selected>Normal</option>
-                        <option value="fast">Fast</option>
-                    </select>
-                </div>
-                <div class="search-hints">
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="Describe what kind of story you're looking for..." autocomplete="off">
+      <button id="searchBtn">
+        <span class="search-icon">🔍</span>
+        <span class="search-text">Search</span>
+      </button>
+    </div>
+    <div class="search-hints">
                     <span>Try:</span>
                     <button class="hint-btn" data-query="a story about dragons and magic">dragons & magic</button>
                     <button class="hint-btn" data-query="romance in a city setting">city romance</button>
@@ -104,20 +96,45 @@
     <!-- Tooltip for graph -->
     <div class="graph-tooltip" id="graphTooltip"></div>
 
-    <!-- Series Modal -->
-    <div class="series-modal-backdrop" id="seriesModalBackdrop" aria-hidden="true">
-        <div class="series-modal" role="dialog" aria-modal="true" aria-labelledby="seriesModalTitle">
-            <div class="series-modal-header">
-                <div>
-                    <div class="series-modal-kicker">Series Details</div>
-                    <h2 class="series-modal-title" id="seriesModalTitle">Series</h2>
-                    <div class="series-modal-subtitle" id="seriesModalSubtitle"></div>
-                </div>
-                <button class="series-modal-close" id="seriesModalClose" type="button" aria-label="Close series details">×</button>
-            </div>
-            <div class="series-modal-body" id="seriesModalBody"></div>
+  <!-- Series Modal -->
+  <div class="series-modal-backdrop" id="seriesModalBackdrop" aria-hidden="true">
+    <div class="series-modal" role="dialog" aria-modal="true" aria-labelledby="seriesModalTitle">
+      <div class="series-modal-header">
+        <div>
+          <div class="series-modal-kicker">Series Details</div>
+          <h2 class="series-modal-title" id="seriesModalTitle">Series</h2>
+          <div class="series-modal-subtitle" id="seriesModalSubtitle"></div>
         </div>
+        <button class="series-modal-close" id="seriesModalClose" type="button" aria-label="Close series details">×</button>
+      </div>
+      <div class="series-modal-body" id="seriesModalBody"></div>
     </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="settings-modal-backdrop" id="settingsModalBackdrop" aria-hidden="true">
+    <div class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+      <div class="settings-modal-header">
+        <div>
+          <div class="settings-modal-kicker">Configuration</div>
+          <h2 class="settings-modal-title" id="settingsModalTitle">Settings</h2>
+          <div class="settings-modal-subtitle">Adjust performance and display limits</div>
+        </div>
+        <button class="settings-modal-close" id="settingsModalClose" type="button" aria-label="Close settings">×</button>
+      </div>
+      <div class="settings-modal-body">
+        <label class="settings-field">
+          <span class="settings-label">Card limit</span>
+          <span class="settings-hint">Max story cards rendered in the grid (lower = faster)</span>
+          <input type="number" id="settingMaxCards" class="settings-input" min="10" max="10000" step="10">
+        </label>
+        <div class="settings-footer">
+          <button type="button" class="settings-reset-btn" id="settingsResetBtn">Reset defaults</button>
+          <button type="button" class="settings-save-btn" id="settingsSaveBtn">Apply & Refresh</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
     <script src="script.js"></script>
 </body>
