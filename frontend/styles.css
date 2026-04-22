@@ -117,41 +117,10 @@ body {
     background: rgba(30, 41, 59, 0.9);
     padding: 0.75rem 1rem;
     border-radius: 8px;
-    backdrop-filter: blur(8px);
-}
+ backdrop-filter: blur(8px);
+ }
 
-.graph-mode-toggle {
-    position: absolute;
-    top: 1rem;
-    right: 1rem;
-    z-index: 2;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.55rem 0.8rem;
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    border-radius: 999px;
-    background: rgba(15, 23, 42, 0.8);
-    color: var(--text-primary);
-    font-size: 0.82rem;
-    font-weight: 600;
-    cursor: pointer;
-    backdrop-filter: blur(10px);
-    transition: all 0.25s var(--transition-smooth);
-}
-
-.graph-mode-toggle:hover {
-    background: rgba(30, 41, 59, 0.92);
-    border-color: rgba(245, 158, 11, 0.42);
-    transform: translateY(-1px);
-}
-
-.graph-mode-toggle:focus-visible {
-    outline: 2px solid var(--secondary-color);
-    outline-offset: 2px;
-}
-
-.graph-zoom-indicator {
+ .graph-zoom-indicator {
     position: absolute;
     top: 1rem;
     left: 1rem;
@@ -1391,16 +1360,9 @@ header h1 {
         min-height: 175px;
         max-height: 175px;
         flex-basis: 175px;
-    }
+}
 
-    .graph-mode-toggle {
-        top: 0.75rem;
-        right: 0.75rem;
-        padding: 0.45rem 0.7rem;
-        font-size: 0.76rem;
-    }
-
-    .graph-mode-hint {
+ .graph-mode-hint {
         min-width: 1.2rem;
         height: 1.2rem;
     }

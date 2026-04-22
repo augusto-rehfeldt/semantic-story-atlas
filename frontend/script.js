@@ -358,8 +358,9 @@ let selectedStoryId = null;
 let queryPosition = null;
 let graphCanvas, graphCtx;
 let animationFrameId = null;
-let viewMode = 'radial'; // 'fixed' or 'radial'
 let graphVisualScale = 1;
+let activeEventSource = null;
+let searchGeneration = 0;
 
 // Animation state
 let animationDuration = 180;
@@ -378,7 +379,6 @@ let panStartOffsetY = 0;
 let searchInput, searchBtn, storiesGrid, progressContainer;
 let progressFill, progressText, hintButtons, graphInfo, graphTooltip, statusMessage;
 let librarySubtitle;
-let viewModeToggle;
 let zoomIndicator, zoomIndicatorText;
 let seriesModalBackdrop, seriesModalClose, seriesModalTitle, seriesModalSubtitle, seriesModalBody;
 let activeSeriesStoryId = null;
@@ -431,9 +431,8 @@ async function init() {
     hintButtons = document.querySelectorAll('.hint-btn');
     graphInfo = document.getElementById('graphInfo');
     graphTooltip = document.getElementById('graphTooltip');
-    statusMessage = document.getElementById('statusMessage');
-    viewModeToggle = document.getElementById('viewModeToggle');
-    zoomIndicator = document.getElementById('zoomIndicator');
+ statusMessage = document.getElementById('statusMessage');
+ zoomIndicator = document.getElementById('zoomIndicator');
     zoomIndicatorText = document.getElementById('zoomIndicatorText');
     librarySubtitle = document.getElementById('librarySubtitle');
     seriesModalBackdrop = document.getElementById('seriesModalBackdrop');
@@ -648,40 +647,28 @@ function drawGraph() {
     // Get radial scale for consistent circle
     const scale = getRadialScale(width, height, padding);
 
-    // Draw grid or radial circles based on view mode
-    if (viewMode === 'radial' && queryPosition) {
-        drawRadialGrid(width, height, padding);
-    } else {
-        drawCartesianGrid(width, height, padding);
-    }
+ // Draw radial grid
+ if (queryPosition) {
+ drawRadialGrid(width, height, padding);
+ } else {
+ drawCartesianGrid(width, height, padding);
+ }
 
-    // Draw connection lines from query/center to top stories
-    if (queryPosition && currentResults.size > 0) {
-        let centerX, centerY;
-        if (viewMode === 'radial') {
-            centerX = scale.centerX;
-            centerY = scale.centerY;
-        } else {
-            centerX = mapToCanvas(queryPosition.x, width, padding);
-            centerY = mapToCanvas(queryPosition.y, height, padding, true);
-        }
+ // Draw connection lines from query/center to top stories
+ if (queryPosition && currentResults.size > 0) {
+ const centerX = scale.centerX;
+ const centerY = scale.centerY;
 
-        const sortedResults = Array.from(currentResults.values())
-            .sort((a, b) => b.similarity - a.similarity)
-            .slice(0, 10);
+ const sortedResults = Array.from(currentResults.values())
+ .sort((a, b) => b.similarity - a.similarity)
+ .slice(0, 10);
 
-        sortedResults.forEach((result) => {
-            const pos = storyPositions.get(result.id);
-            if (!pos) return;
+ sortedResults.forEach((result) => {
+ const pos = storyPositions.get(result.id);
+ if (!pos) return;
 
-            let sx, sy;
-            if (viewMode === 'radial') {
-                sx = scale.centerX + pos.x * scale.radius;
-                sy = scale.centerY + pos.y * scale.radius;
-            } else {
-                sx = mapToCanvas(pos.x, width, padding);
-                sy = mapToCanvas(pos.y, height, padding, true);
-            }
+ const sx = scale.centerX + pos.x * scale.radius;
+ const sy = scale.centerY + pos.y * scale.radius;
 
             const alpha = 0.1 + (result.similarity * 0.4);
             graphCtx.strokeStyle = `rgba(245, 158, 11, ${alpha})`;
@@ -708,21 +695,15 @@ function drawGraph() {
   graphCtx.lineWidth = defaultLineWidth;
   graphCtx.beginPath();
 
-  allStories.forEach(story => {
-    if (story.id === selectedStoryId) { selectedStory = story; return; }
-    if (currentResults.has(story.id)) { resultStories.push(story); return; }
-    const pos = storyPositions.get(story.id);
-    if (!pos) return;
-    let x, y;
-    if (viewMode === 'radial') {
-      x = scale.centerX + pos.x * scale.radius;
-      y = scale.centerY + pos.y * scale.radius;
-    } else {
-      x = mapToCanvas(pos.x, width, padding);
-      y = mapToCanvas(pos.y, height, padding, true);
-    }
-    graphCtx.moveTo(x + defaultRadius, y);    graphCtx.arc(x, y, defaultRadius, 0, Math.PI * 2);
-  });
+ allStories.forEach(story => {
+ if (story.id === selectedStoryId) { selectedStory = story; return; }
+ if (currentResults.has(story.id)) { resultStories.push(story); return; }
+ const pos = storyPositions.get(story.id);
+ if (!pos) return;
+ const x = scale.centerX + pos.x * scale.radius;
+ const y = scale.centerY + pos.y * scale.radius;
+ graphCtx.moveTo(x + defaultRadius, y); graphCtx.arc(x, y, defaultRadius, 0, Math.PI * 2);
+ });
 
   graphCtx.fill();
   graphCtx.stroke();
@@ -733,16 +714,10 @@ function drawGraph() {
     drawStoryPoint(story, width, height, padding, false, overlayAnnotations);
   });
 
-    // Draw query point / center
-    if (queryPosition) {
-        let qx, qy;
-        if (viewMode === 'radial') {
-            qx = scale.centerX;
-            qy = scale.centerY;
-        } else {
-            qx = mapToCanvas(queryPosition.x, width, padding);
-            qy = mapToCanvas(queryPosition.y, height, padding, true);
-        }
+ // Draw query point / center
+ if (queryPosition) {
+ const qx = scale.centerX;
+ const qy = scale.centerY;
 
         // Animated glow
         const time = Date.now() / 1000;
@@ -777,7 +752,7 @@ function drawGraph() {
             type: 'query',
             x: qScreen.x,
             y: qScreen.y,
-            text: viewMode === 'radial' ? 'QUERY CENTER' : 'YOUR QUERY',
+            text: 'QUERY CENTER',
         });
     }
 
@@ -825,23 +800,6 @@ function getRadialScale(width, height, padding) {
         centerY: height / 2,
         radius: diameter / 2
     };
-}
-
-function mapRadialToCanvas(value, size, padding, isY = false, width = null, height = null) {
-    // If width and height provided, use proper circular mapping
-    if (width !== null && height !== null) {
-        const scale = getRadialScale(width, height, padding);
-        if (isY) {
-            return scale.centerY + value * scale.radius;
-        } else {
-            return scale.centerX + value * scale.radius;
-        }
-    }
-
-    // Fallback for old usage
-    const center = size / 2;
-    const maxRadius = Math.min(size, size) / 2 - padding;
-    return center + value * maxRadius;
 }
 
 function drawRadialGrid(width, height, padding) {
@@ -977,18 +935,12 @@ function drawOverlayAnnotations(annotations) {
 }
 
 function drawStoryPoint(story, width, height, padding, isSelected = false, overlayAnnotations = null) {
-    const pos = storyPositions.get(story.id);
-    if (!pos) return;
+ const pos = storyPositions.get(story.id);
+ if (!pos) return;
 
-    let x, y;
-    if (viewMode === 'radial') {
-        const scale = getRadialScale(width, height, padding);
-        x = scale.centerX + pos.x * scale.radius;
-        y = scale.centerY + pos.y * scale.radius;
-    } else {
-        x = mapToCanvas(pos.x, width, padding);
-        y = mapToCanvas(pos.y, height, padding, true);
-    }
+ const scale = getRadialScale(width, height, padding);
+ const x = scale.centerX + pos.x * scale.radius;
+ const y = scale.centerY + pos.y * scale.radius;
 
     const result = currentResults.get(story.id);
     const selected = isSelected || story.id === selectedStoryId;
@@ -1048,12 +1000,6 @@ function drawStoryPoint(story, width, height, padding, isSelected = false, overl
 }
 
 
-function mapToCanvas(value, size, padding, invert = false) {
-    const normalized = (value + 1.2) / 2.4;
-    const mapped = padding + normalized * (size - 2 * padding);
-    return invert ? size - mapped : mapped;
-}
-
 function handleGraphMouseMove(e) {
     if (isPanning) return; // Don't show tooltips while panning
 
@@ -1067,20 +1013,14 @@ function handleGraphMouseMove(e) {
     const height = graphCanvas.clientHeight;
     const scale = getRadialScale(width, height, padding);
 
-    // Check if hovering over query
-    if (queryPosition) {
-        let qx, qy;
-        if (viewMode === 'radial') {
-            qx = scale.centerX;
-            qy = scale.centerY;
-        } else {
-            qx = mapToCanvas(queryPosition.x, width, padding);
-            qy = mapToCanvas(queryPosition.y, height, padding, true);
-        }
+ // Check if hovering over query
+ if (queryPosition) {
+ const qx = scale.centerX;
+ const qy = scale.centerY;
         const distToQuery = Math.sqrt((mouseX - qx) ** 2 + (mouseY - qy) ** 2);
 
         if (distToQuery < 15) {
-            graphTooltip.innerHTML = `<strong>${viewMode === 'radial' ? 'Query Center' : 'Your Query'}</strong>`;
+            graphTooltip.innerHTML = `<strong>Query Center</strong>`;
             graphTooltip.style.left = `${e.clientX + 15}px`;
             graphTooltip.style.top = `${e.clientY + 15}px`;
             graphTooltip.classList.add('visible');
@@ -1089,35 +1029,31 @@ function handleGraphMouseMove(e) {
         }
     }
 
-  let closestStory = null;
-  let closestDist = Infinity;
+ let closestStory = null;
+ let closestDist = Infinity;
 
-  allStories.forEach(story => {
-        const pos = storyPositions.get(story.id);
-        if (!pos) return;
+ allStories.forEach(story => {
+ const pos = storyPositions.get(story.id);
+ if (!pos) return;
 
-        let x, y;
-        if (viewMode === 'radial') {
-            x = scale.centerX + pos.x * scale.radius;
-            y = scale.centerY + pos.y * scale.radius;
-        } else {
-            x = mapToCanvas(pos.x, width, padding);
-            y = mapToCanvas(pos.y, height, padding, true);
-        }
+ const x = scale.centerX + pos.x * scale.radius;
+ const y = scale.centerY + pos.y * scale.radius;
 
-        const dist = Math.sqrt((mouseX - x) ** 2 + (mouseY - y) ** 2);
-        if (dist < closestDist && dist < 25) {
-            closestDist = dist;
-            closestStory = story;
-        }
-    });
+ const dist = Math.sqrt((mouseX - x) ** 2 + (mouseY - y) ** 2);
+ if (dist < closestDist && dist < 25) {
+ closestDist = dist;
+ closestStory = story;
+ }
+ });
 
-    if (closestStory) {
-        const result = currentResults.get(closestStory.id);
-        graphTooltip.innerHTML = `
-            <strong>${closestStory.title}</strong>
-            ${result ? `<br><span style="color: #10b981;">Match: ${(result.similarity * 100).toFixed(1)}%</span>` : ''}
-        `;
+ if (closestStory) {
+ const result = currentResults.get(closestStory.id);
+ const origPos = originalPositions.get(closestStory.id);
+ graphTooltip.innerHTML = `
+ <strong>${closestStory.title}</strong>
+ ${result ? `<br><span style="color: #10b981;">Match: ${(result.similarity * 100).toFixed(1)}%</span>` : ''}
+ ${origPos ? `<br><span style="color: #94a3b8; font-size: 0.8em;">x ${origPos.x.toFixed(3)}, y ${origPos.y.toFixed(3)}</span>` : ''}
+ `;
         graphTooltip.style.left = `${e.clientX + 15}px`;
         graphTooltip.style.top = `${e.clientY + 15}px`;
         graphTooltip.classList.add('visible');
@@ -1144,18 +1080,12 @@ function handleGraphClick(e) {
   let clickedStory = null;
   let closestDist = Infinity;
 
-  allStories.forEach(story => {
-        const pos = storyPositions.get(story.id);
-        if (!pos) return;
+ allStories.forEach(story => {
+ const pos = storyPositions.get(story.id);
+ if (!pos) return;
 
-        let x, y;
-        if (viewMode === 'radial') {
-            x = scale.centerX + pos.x * scale.radius;
-            y = scale.centerY + pos.y * scale.radius;
-        } else {
-            x = mapToCanvas(pos.x, width, padding);
-            y = mapToCanvas(pos.y, height, padding, true);
-        }
+ const x = scale.centerX + pos.x * scale.radius;
+ const y = scale.centerY + pos.y * scale.radius;
 
         const dist = Math.sqrt((mouseX - x) ** 2 + (mouseY - y) ** 2);
         if (dist < closestDist && dist < 25) {
@@ -1239,10 +1169,15 @@ function renderGraphSummary(story, result) {
 
     const seriesMembers = getSeriesMembers(story);
 
-    const previewText = story.summary || story.content || 'No summary available.';
-    const coverHTML = story.cover_url
-        ? `<img class="summary-cover" src="${story.cover_url}" alt="${story.title}" loading="lazy">`
-        : '';
+ const previewText = story.summary || story.content || 'No summary available.';
+ const coverHTML = story.cover_url
+ ? `<img class="summary-cover" src="${story.cover_url}" alt="${story.title}" loading="lazy">`
+ : '';
+
+ const origPos = originalPositions.get(story.id);
+ const coordsHTML = origPos
+ ? `<span class="meta-tag" title="Embedding space coordinates">x ${origPos.x.toFixed(3)}, y ${origPos.y.toFixed(3)}</span>`
+ : '';
 
     graphInfo.innerHTML = `
         <div class="summary-viewer">
@@ -1252,8 +1187,8 @@ function renderGraphSummary(story, result) {
                     <div class="summary-title-block">
                         <div class="summary-kicker">Selected Story</div>
                         <div class="summary-title">${story.title}</div>
-                        ${author ? `<div class="summary-author">by ${formatAuthors(author)}</div>` : ''}
-                        <div class="summary-meta">${metaParts.join(' ')}</div>
+ ${author ? `<div class="summary-author">by ${formatAuthors(author)}</div>` : ''}
+ <div class="summary-meta">${metaParts.join(' ')} ${coordsHTML}</div>
                     </div>
                 </div>
                 ${result ? `
@@ -1294,39 +1229,6 @@ function renderGraphSummary(story, result) {
     const summaryBody = graphInfo.querySelector('.summary-body');
     if (summaryBody) {
         summaryBody.scrollTop = 0;
-    }
-}
-
-function toggleViewMode() {
-    if (!queryPosition) {
-        showStatus('⚠️ Perform a search first to enable view modes', 'error');
-        setTimeout(hideStatus, 2000);
-        return;
-    }
-
-  viewMode = viewMode === 'fixed' ? 'radial' : 'fixed';
-  animateStoriesToCurrentView(10);
-  markGraphDirty();
-
-    const modeText = viewMode === 'fixed'
-        ? 'Fixed positions (true embedding space)'
-        : 'Radial view (distance = similarity to query)';
-    showStatus(`View: ${modeText}`, 'info');
-    setTimeout(hideStatus, 2500);
-
-    updateViewModeButton();
-}
-
-function updateViewModeButton() {
-    if (viewModeToggle) {
-        const icon = viewModeToggle.querySelector('.graph-mode-icon');
-        const text = viewModeToggle.querySelector('.graph-mode-text');
-        const hint = viewModeToggle.querySelector('.graph-mode-hint');
-        const isRadial = viewMode === 'radial';
-        if (icon) icon.textContent = isRadial ? '🎯' : '📍';
-        if (text) text.textContent = isRadial ? 'Radial view' : 'Fixed view';
-        if (hint) hint.textContent = 'V';
-        viewModeToggle.setAttribute('aria-pressed', String(isRadial));
     }
 }
 
@@ -1662,22 +1564,13 @@ function setupEventListeners() {
         });
     });
 
-    if (viewModeToggle) {
-        viewModeToggle.addEventListener('click', toggleViewMode);
-    }
-
-  document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    closeSettingsModal();
-    closeSeriesModal();
-    deselectStory();
-  }
-        if ((e.key === 'v' || e.key === 'V') && !e.ctrlKey && !e.metaKey) {
-            if (document.activeElement !== searchInput) {
-                toggleViewMode();
-            }
-        }
-    });
+ document.addEventListener('keydown', (e) => {
+ if (e.key === 'Escape') {
+ closeSettingsModal();
+ closeSeriesModal();
+ deselectStory();
+ }
+ });
 }
 
 function setupModalListeners() {
@@ -1819,10 +1712,9 @@ function applySettings() {
   if (Number.isFinite(newMaxCards) && newMaxCards >= 10) appSettings.maxCards = newMaxCards;
   saveSettings();
   closeSettingsModal();
-  storyMotionStates.clear();
-  renderStories(getVisibleCardStories());
-  animateStoriesToCurrentView(5);
-  markGraphDirty();
+ storyMotionStates.clear();
+ renderStories(getVisibleCardStories());
+ markGraphDirty();
   if (librarySubtitle && allStories.length) {
     const total = allStories.length.toLocaleString();
     const showing = getVisibleCardStories().length.toLocaleString();
@@ -1840,101 +1732,104 @@ function resetSettings() {
 }
 
 async function performSearch() {
-    const query = searchInput.value.trim();
-    if (!query) {
-        showStatus('⚠️ Please enter a search query', 'error');
-        setTimeout(hideStatus, 2000);
-        return;
-    }
+ const query = searchInput.value.trim();
+ if (!query) {
+ showStatus('⚠️ Please enter a search query', 'error');
+ setTimeout(hideStatus, 2000);
+ return;
+ }
 
-    const speed = 'fast';
+ const speed = 'fast';
+ const generation = ++searchGeneration;
 
-    console.log(`[SEARCH] Starting search for: "${query}"`);
+ if (activeEventSource) {
+ activeEventSource.close();
+ activeEventSource = null;
+ console.log('[SEARCH] Aborted previous search');
+ }
 
-    progressContainer.classList.add('active');
-    progressFill.style.width = '0%';
-    progressText.textContent = 'Encoding query...';
-    showStatus('🔍 Encoding your query into embedding space...', 'info');
+ console.log(`[SEARCH] Starting search for: "${query}"`);
 
-  // Reset state
-  currentResults.clear();
-  queryPosition = null;
-  selectedStoryId = null;
-  viewMode = 'radial';
-  markGraphDirty();
-    panOffsetX = 0;
-    panOffsetY = 0;
-    zoomLevel = 1;
-    storyMotionStates.clear();
-    allStories.forEach(story => {
-        const basePosition = originalPositions.get(story.id);
-        if (basePosition) {
-            storyPositions.set(story.id, { ...basePosition });
-        }
-    });
-    updateViewModeButton();
+ progressContainer.classList.add('active');
+ progressFill.style.width = '0%';
+ progressText.textContent = 'Encoding query...';
+ showStatus('🔍 Encoding your query into embedding space...', 'info');
 
-    // Reset card styles
-    storyElements.forEach(card => {
-        card.classList.remove('has-similarity', 'has-rank', 'selected', 'pulse');
-        const rankBadge = card.querySelector('.rank-badge');
-        if (rankBadge) {
-            rankBadge.classList.remove('top-3', 'top-1');
-        }
-        const similarityValue = card.querySelector('.similarity-value');
-        if (similarityValue) {
-            similarityValue.textContent = '';
-        }
-        const similarityFill = card.querySelector('.similarity-bar-fill');
-        if (similarityFill) {
-            similarityFill.style.width = '0%';
-        }
-    });
-    displayGroups.forEach(group => refreshGroupCardForStory(group.members[0].id));
+ currentResults.clear();
+ queryPosition = null;
+ selectedStoryId = null;
+ markGraphDirty();
+ panOffsetX = 0;
+ panOffsetY = 0;
+ zoomLevel = 1;
+ storyMotionStates.clear();
+ originalPositions.forEach((pos, id) => storyPositions.set(id, { ...pos }));
+ markGraphDirty();
 
-    try {
-        const url = `${API_BASE}/search/stream?query=${encodeURIComponent(query)}&speed=${speed}`;
-        console.log(`[SEARCH] Connecting to: ${url}`);
+ storyElements.forEach(card => {
+ card.classList.remove('has-similarity', 'has-rank', 'selected', 'pulse');
+ const rankBadge = card.querySelector('.rank-badge');
+ if (rankBadge) {
+ rankBadge.classList.remove('top-3', 'top-1');
+ }
+ const similarityValue = card.querySelector('.similarity-value');
+ if (similarityValue) {
+ similarityValue.textContent = '';
+ }
+ const similarityFill = card.querySelector('.similarity-bar-fill');
+ if (similarityFill) {
+ similarityFill.style.width = '0%';
+ }
+ });
+ displayGroups.forEach(group => refreshGroupCardForStory(group.members[0].id));
 
-        const eventSource = new EventSource(url);
+ try {
+ const url = `${API_BASE}/search/stream?query=${encodeURIComponent(query)}&speed=${speed}`;
+ console.log(`[SEARCH] Connecting to: ${url}`);
 
-        eventSource.onopen = () => {
-            console.log('[SEARCH] EventSource connection opened');
-        };
+ const es = new EventSource(url);
+ activeEventSource = es;
 
-        eventSource.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('[SEARCH] Received event:', data.type);
+ es.onopen = () => {
+ if (generation !== searchGeneration) return;
+ console.log('[SEARCH] EventSource connection opened');
+ };
 
-    if (data.type === 'query_position') {
-      console.log('[SEARCH] Query position:', data.position);
-      queryPosition = data.position;
-      markGraphDirty();
-      showStatus('📍 Query projected to embedding space', 'info');
-                } else if (data.type === 'update') {
-                    handleStreamUpdate(data);
-                } else if (data.type === 'complete') {
-                    handleStreamComplete(data);
-                    eventSource.close();
-                }
-            } catch (parseError) {
-                console.error('[SEARCH] Failed to parse event data:', parseError, event.data);
-            }
-        };
+ es.onmessage = (event) => {
+ if (generation !== searchGeneration) { es.close(); return; }
+ try {
+ const data = JSON.parse(event.data);
 
-        eventSource.onerror = (error) => {
-            console.error('[SEARCH] EventSource error:', error);
-            eventSource.close();
-            progressContainer.classList.remove('active');
-            showStatus('❌ Search failed. Please try again.', 'error');
-        };
+ if (data.type === 'query_position') {
+ queryPosition = data.position;
+ markGraphDirty();
+ showStatus('📍 Query projected to embedding space', 'info');
+ } else if (data.type === 'update') {
+ handleStreamUpdate(data);
+ } else if (data.type === 'complete') {
+ handleStreamComplete(data);
+ es.close();
+ if (activeEventSource === es) activeEventSource = null;
+ }
+ } catch (parseError) {
+ console.error('[SEARCH] Failed to parse event data:', parseError);
+ }
+ };
 
-    } catch (error) {
-        console.error('[SEARCH] Search error:', error);
-        progressContainer.classList.remove('active');
-        showStatus('❌ Search failed. Please try again.', 'error');
-    }
+ es.onerror = () => {
+ if (generation !== searchGeneration) return;
+ console.error('[SEARCH] EventSource error');
+ es.close();
+ if (activeEventSource === es) activeEventSource = null;
+ progressContainer.classList.remove('active');
+ showStatus('❌ Search failed. Please try again.', 'error');
+ };
+
+ } catch (error) {
+ console.error('[SEARCH] Search error:', error);
+ progressContainer.classList.remove('active');
+ showStatus('❌ Search failed. Please try again.', 'error');
+ }
 }
 
 function handleStreamUpdate(data) {
@@ -1962,12 +1857,10 @@ function handleStreamUpdate(data) {
         });
     }
 
-    const targetPosition = viewMode === 'radial'
-        ? radialPositions.get(story.id)
-        : originalPositions.get(story.id);
-    if (targetPosition) {
-        queueStoryPositionAnimation(story.id, targetPosition);
-    }
+ const targetPosition = radialPositions.get(story.id);
+ if (targetPosition) {
+ queueStoryPositionAnimation(story.id, targetPosition);
+ }
 
     refreshGroupCardForStory(story.id);
     refreshSeriesModalIfOpen();
@@ -2005,7 +1898,7 @@ function handleStreamComplete(data) {
 
     progressFill.style.width = '100%';
     progressText.textContent = '✓ Search complete!';
-    showStatus('✅ Search complete! Press V to toggle view modes.', 'success');
+    showStatus('✅ Search complete!', 'success');
 
     setTimeout(() => {
         progressContainer.classList.remove('active');
@@ -2034,9 +1927,8 @@ function handleStreamComplete(data) {
     });
 
   displayGroups.forEach(group => refreshGroupCardForStory(group.members[0].id));
-  reorderCards();
-  refreshSeriesModalIfOpen();
-  animateStoriesToCurrentView(5);
+ reorderCards();
+ refreshSeriesModalIfOpen();
   if (librarySubtitle && allStories.length) {
     const total = allStories.length.toLocaleString();
     const showing = getVisibleCardStories().length.toLocaleString();
@@ -2048,18 +1940,8 @@ function handleStreamComplete(data) {
   // Set query position
   if (data.query_position) {
     console.log('[SEARCH] Final query position:', data.query_position);
-    queryPosition = data.query_position;
-    markGraphDirty();
-  }
+ queryPosition = data.query_position;
+ markGraphDirty();
+ }
 
-}
-
-function animateStoriesToCurrentView(staggerMs = 0) {
-  allStories.forEach((story, index) => {
-    const targetPosition = viewMode === 'radial'
-      ? radialPositions.get(story.id)
-      : originalPositions.get(story.id);
-    if (!targetPosition) return;
-    queueStoryPositionAnimation(story.id, targetPosition, index * staggerMs);
-  });
-}
+ }
