@@ -1,7 +1,5 @@
 # Core
 flask
-flask-cors
-python-dotenv
 tqdm
 sentence-transformers>=2.7.0
 numpy

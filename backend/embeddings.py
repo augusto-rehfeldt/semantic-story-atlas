@@ -4,6 +4,7 @@ import hashlib
 import csv
 import re
 import time
+import tempfile
 from urllib.parse import quote
 import numpy as np
 from typing import List, Dict, Tuple, Optional
@@ -65,6 +66,19 @@ def build_cache_stem(provider: str, model_name: str) -> str:
     provider_slug = re.sub(r"[^a-z0-9]+", "_", provider.lower()).strip("_")
     model_slug = re.sub(r"[^a-z0-9]+", "_", model_name.lower()).strip("_")
     return f"{provider_slug}_{model_slug}"
+
+
+def atomic_json(path, value):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                         dir=os.path.dirname(os.path.abspath(path)), delete=False) as stream:
+            temporary = stream.name
+            json.dump(value, stream)
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 class EmbeddingsManager:
@@ -180,8 +194,7 @@ class EmbeddingsManager:
 
     def _save_cache(self, cache: Dict):
         self._emit_status(f"Saving {len(cache)} embeddings to cache...")
-        with open(self.cache_file, "w") as f:
-            json.dump(cache, f)
+        atomic_json(self.cache_file, cache)
         self._emit_status("Embeddings cached successfully!")
 
     def _load_projection_cache(self) -> Optional[Dict]:
@@ -196,8 +209,8 @@ class EmbeddingsManager:
 
     def _save_projection_cache(self, projections: Dict):
         self._emit_status("Saving 2D projections to cache...")
-        with open(self.projection_cache_file, "w") as f:
-            json.dump(projections, f)
+        atomic_json(self.projection_cache_file, {
+            'fingerprint': self.dataset_fingerprint, 'positions': projections})
 
     def _get_target_devices(self) -> List[str]:
         torch = _get_torch()
@@ -404,10 +417,10 @@ class EmbeddingsManager:
         return f"/api/story/{quote(story_id, safe='')}/cover"
 
     def _create_reducer(self):
-        if HAS_UMAP:
+        if HAS_UMAP and len(self.story_keys) > 3:
             return umap.UMAP(
                 n_components=2,
-                n_neighbors=15,
+                n_neighbors=min(15, len(self.story_keys) - 1),
                 min_dist=0.1,
                 metric="cosine",
                 random_state=42,
@@ -419,9 +432,15 @@ class EmbeddingsManager:
         """Normalize projections to [-1, 1] range."""
         min_vals = projections.min(axis=0)
         max_vals = projections.max(axis=0)
-        return 2 * (projections - min_vals) / (max_vals - min_vals) - 1
+        self.projection_min = min_vals
+        self.projection_span = np.where(max_vals > min_vals, max_vals - min_vals, 1)
+        return 2 * (projections - min_vals) / self.projection_span - 1
 
     def _compute_2d_projections(self):
+        if len(self.story_keys) < 2:
+            self.projections_2d = np.zeros((len(self.story_keys), 2))
+            self.reducer = None
+            return
         method = "UMAP" if HAS_UMAP else "PCA"
         self._emit_status(f"Computing 2D projections using {method}...")
 
@@ -444,11 +463,7 @@ class EmbeddingsManager:
         try:
             projection = self.reducer.transform(query_embedding.reshape(1, -1))[0]
 
-            min_vals = self.projections_2d.min(axis=0)
-            max_vals = self.projections_2d.max(axis=0)
-
-            projection = np.clip(projection, min_vals - 0.5, max_vals + 0.5)
-            projection = 2 * (projection - min_vals) / (max_vals - min_vals) - 1
+            projection = 2 * (projection - self.projection_min) / self.projection_span - 1
             projection = np.clip(projection, -1.2, 1.2)
 
             return (float(projection[0]), float(projection[1]))
@@ -463,9 +478,11 @@ class EmbeddingsManager:
         self.embeddings_matrix = np.array(
             [self.stories[key]["embedding"] for key in self.story_keys]
         )
+        if not self.story_keys:
+            self.embeddings_matrix = np.zeros((0, 2))
         # Pre-normalize for fast cosine similarity
         norms = np.linalg.norm(self.embeddings_matrix, axis=1, keepdims=True)
-        self.normalized_matrix = self.embeddings_matrix / norms
+        self.normalized_matrix = self.embeddings_matrix / np.where(norms > 0, norms, 1)
 
     @staticmethod
     def _parse_frontmatter(text):
@@ -575,7 +592,6 @@ class EmbeddingsManager:
         yield record
 
     def _iter_csv_story_records(self, filename: str, filepath: str):
-        file_hash = self._get_file_hash(filepath)
         self._emit_status(f"Reading CSV file: {filename}")
         with open(filepath, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
@@ -621,8 +637,8 @@ class EmbeddingsManager:
 
                 yield {
                     "source_filename": filename,
-                    "story_id": f"{base_name}_{row_index:04d}",
-                    "file_hash": f"{file_hash}_row_{row_index}",
+                    "story_id": normalized.get('id') or f"{base_name}_{row_index:04d}",
+                    "calibre_id": normalized.get('calibre_id', ''),
                     "title": title,
                     "author": author,
                     "summary": normalized.get("summary", ""),
@@ -655,6 +671,9 @@ class EmbeddingsManager:
             cache = self._load_cache()
 
             story_records = list(self._iter_story_records())
+            ids = [record['story_id'] for record in story_records]
+            if len(set(ids)) != len(ids):
+                raise ValueError('Duplicate story IDs in the collection')
             self._emit_status(f"Found {len(story_records)} story entries")
 
             if self.benchmark_encoding:
@@ -670,7 +689,9 @@ class EmbeddingsManager:
             cached_embeddings_count = 0
 
             for idx, record in enumerate(story_records):
-                cache_key = f"{record['source_filename']}_{record['file_hash']}"
+                cache_key = hashlib.sha256(json.dumps([
+                    self.embedding_provider, self.model_name, self._build_embedding_text(record)
+                ], ensure_ascii=False).encode('utf-8')).hexdigest()
                 if cache_key in cache:
                     embedding = np.array(cache[cache_key]["embedding"])
                     cached_embeddings_count += 1
@@ -696,37 +717,6 @@ class EmbeddingsManager:
 
                 for entry, embedding in zip(uncached_entries, embeddings):
                     entry["embedding"] = np.array(embedding)
-                    updated_cache[entry["cache_key"]] = {
-                        "embedding": (
-                            embedding.tolist()
-                            if isinstance(embedding, np.ndarray)
-                            else embedding
-                        ),
-                        "title": entry["record"]["title"],
-                    }
-                    story_data = {
-                        "title": entry["record"]["title"],
-                        "content": (
-                            entry["record"]["content"][:500] + "..."
-                            if len(entry["record"]["content"]) > 500
-                            else entry["record"]["content"]
-                        ),
-                        "embedding": np.array(embedding),
-                        "filename": entry["record"]["source_filename"],
-                        "author": entry["record"]["author"],
-                    }
-                    for key in (
-                        "summary",
-                        "cover",
-                        "series",
-                        "series_index",
-                        "genre",
-                        "tags",
-                        "year",
-                    ):
-                        if entry["record"].get(key):
-                            story_data[key] = entry["record"][key]
-                    self.stories[entry["record"]["story_id"]] = story_data
                 new_embeddings_count = len(uncached_entries)
 
             self._emit_status(
@@ -756,6 +746,7 @@ class EmbeddingsManager:
                     "author": entry["record"]["author"],
                 }
                 for key in (
+                    "calibre_id",
                     "summary",
                     "cover",
                     "series",
@@ -774,16 +765,23 @@ class EmbeddingsManager:
             self._save_cache(updated_cache)
             self._build_index()
 
+            self.dataset_fingerprint = hashlib.sha256(json.dumps([
+                self.embedding_provider, self.model_name, bool(HAS_UMAP),
+                [(entry['record']['story_id'], entry['cache_key']) for entry in story_entries]
+            ]).encode('utf-8')).hexdigest()
+
             # Load or compute 2D projections
             projection_cache = self._load_projection_cache()
-            if projection_cache and len(projection_cache) == len(self.story_keys):
+            if (len(self.story_keys) > 1 and isinstance(projection_cache, dict)
+                    and projection_cache.get('fingerprint') == self.dataset_fingerprint
+                    and set(projection_cache.get('positions', {})) == set(self.story_keys)):
                 self._emit_status("Using cached 2D projections")
                 self.projections_2d = np.array(
-                    [projection_cache[key] for key in self.story_keys]
+                    [projection_cache['positions'][key] for key in self.story_keys]
                 )
                 self._emit_status("Fitting reducer for query projection...")
                 self.reducer = self._create_reducer()
-                self.reducer.fit(self.embeddings_matrix)
+                self._normalize_projections(self.reducer.fit_transform(self.embeddings_matrix))
                 self._emit_status("Reducer fitted successfully!")
             else:
                 self._compute_2d_projections()
@@ -813,6 +811,7 @@ class EmbeddingsManager:
         story = self.stories[key]
         meta = {}
         for field in (
+            "calibre_id",
             "author",
             "summary",
             "cover",

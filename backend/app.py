@@ -6,10 +6,18 @@ import time
 import threading
 import logging
 from datetime import datetime
-from dotenv import load_dotenv
-load_dotenv()
+from pathlib import Path
+
+# ponytail: minimal .env reader instead of python-dotenv; no multiline/export syntax.
+_env = Path(__file__).resolve().parent.parent / ".env"
+for _line in (_env.read_text(encoding="utf-8").splitlines() if _env.exists() else []):
+    _key, _sep, _value = _line.strip().partition("=")
+    _value = _value.strip()
+    if len(_value) > 1 and _value[0] == _value[-1] and _value[0] in "\"'":
+        _value = _value[1:-1]
+    if _sep and _key.strip() and not _key.startswith("#"):
+        os.environ.setdefault(_key.strip(), _value)
 from flask import Flask, jsonify, request, Response, stream_with_context, send_from_directory, send_file
-from flask_cors import CORS
 from embeddings import EmbeddingsManager, build_cache_stem
 
 
@@ -35,10 +43,14 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING)
 # Serve frontend static files
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 app = Flask(__name__, static_folder=frontend_path, static_url_path="")
-CORS(app)
 
 # Initialize embeddings manager
 stories_path = os.path.join(os.path.dirname(__file__), "..", "stories")
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Explore a local text collection')
+    parser.add_argument('--stories', default=stories_path, help='Folder containing TXT/CSV inputs')
+    stories_path = os.path.abspath(os.path.expanduser(parser.parse_args().stories))
 covers_path = os.path.join(stories_path, "covers")
 backend_path = os.path.dirname(__file__)
 encoding_mode = os.getenv("EMBEDDING_ENCODING_MODE", "auto")
