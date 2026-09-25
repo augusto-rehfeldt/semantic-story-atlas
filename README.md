@@ -174,3 +174,20 @@ If you change your dataset and want a clean rebuild, delete the cache files and 
 - Cover images can live in `stories/covers/` or be referenced by path in story metadata.
 - `examples/` contains sample text files you can copy into your own dataset.
 - If the configured port is busy, the backend automatically tries the next port up to 5099.
+
+## Calibre/book-watch integration
+
+From book-watch, run `python book_watch.py export-atlas --output data/atlas/library.csv`.
+Then, from this project, run `python backend/app.py --stories ../book-watch/data/atlas`.
+This selects the exported library without mixing it into the original stories folder.
+The summarizer plugin's custom column feeds the export; book comments are a fallback.
+
+CSV may include `id` and `calibre_id`. Explicit IDs survive sorting and re-export;
+duplicate IDs are rejected. Files without explicit IDs retain their legacy row IDs.
+Embedding caches use the actual per-record embedding text, provider and model, so an
+edited CSV row does not re-encode every other row. Projection caches fingerprint the
+ordered dataset; replacing/editing stories rebuilds positions automatically. Legacy
+caches are rebuilt once. Restart the backend after updating a collection.
+
+Offline cache checks (tiny synthetic encoder, no downloads):
+`python -B -m unittest -q test_cache`.

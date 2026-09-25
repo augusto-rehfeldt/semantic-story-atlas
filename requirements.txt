@@ -1,6 +1,6 @@
 # Core
 flask
-flask-cors
+tqdm
 sentence-transformers>=2.7.0
 numpy
 torch
