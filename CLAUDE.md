@@ -17,3 +17,9 @@ Flask + vanilla JS: embeddings index of a text collection, 2D projection, natura
 - Hash embedding inputs per record and fingerprint projections by ordered dataset.
 - `--stories` selects a collection; never combine exports with an existing collection implicitly.
 - Check: `python -B -m unittest -q test_cache` (no model/network needed).
+
+## Embeddings providers
+
+- `sentence_transformers` runs in-process. `lm_studio` (any OpenAI-compatible `/embeddings`)
+  goes through book writer's shared AIService (`shared_embedding_service()`, `AIService.embed`;
+  sibling `book writer` folder or `ATLAS_BOOK_WRITER`) — no provider client of its own.

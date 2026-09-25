@@ -13,6 +13,48 @@ with patch.dict(sys.modules, {'umap': None}):
     from backend import embeddings as module
 
 
+class SharedSuiteTests(unittest.TestCase):
+    """LM Studio embeddings run on book writer's shared AIService, not a client of our own."""
+
+    def manager(self, folder):
+        return module.EmbeddingsManager(stories_folder=folder, embedding_provider="lm_studio",
+                                        model_name="embed-model", max_batch_size=2,
+                                        lm_studio_base_url="http://127.0.0.1:1234/v1", lm_studio_api_key="lm-key")
+
+    def test_lm_studio_uses_the_shared_service(self):
+        service = type("S", (), {})()
+        service.calls = []
+        service.embed = lambda texts, model=None: (service.calls.append((list(texts), model)),
+                                                   [[float(len(t)), 1.0] for t in texts])[1]
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(module, "shared_embedding_service", return_value=service) as factory:
+            manager = self.manager(folder)
+            manager.load_model()
+            vectors = manager._encode_texts(["a\nb", "cc", "ddd"])
+            query = manager._encode_query("find")
+        self.assertEqual(factory.call_args.args, ("http://127.0.0.1:1234/v1", "lm-key", "embed-model"))
+        self.assertEqual([c[0] for c in service.calls[:2]], [["a b", "cc"], ["ddd"]])  # batched, newlines flattened
+        self.assertTrue(all(model == "embed-model" for _texts, model in service.calls))
+        self.assertEqual(np.asarray(vectors).shape, (3, 2))
+        self.assertEqual(query.dtype, np.float32)
+
+    def test_shared_embedding_service_is_book_writers(self):
+        built = []
+        fake = type("M", (), {"AIService": lambda *a, **k: built.append((a, k)) or "svc"})
+        with patch.object(module, "_book_writer_ai_service", return_value=fake):
+            self.assertEqual(module.shared_embedding_service("http://h/v1", "k", "m"), "svc")
+        args, kwargs = built[0]
+        self.assertIsNone(args[0])
+        overrides = kwargs["config_overrides"]
+        self.assertEqual((overrides["provider"], overrides["base_url"], overrides["api_key"], overrides["writing_model"]),
+                         ("openrouter", "http://h/v1", "k", "m"))
+        self.assertFalse(kwargs["allow_auth_prompt"])
+
+    def test_no_provider_client_of_its_own(self):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("from openai import", source)
+
+
 class CacheTests(unittest.TestCase):
     def test_edit_replace_and_reorder_reuse_only_unchanged_embeddings(self):
         with tempfile.TemporaryDirectory() as folder:

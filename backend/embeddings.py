@@ -10,10 +10,31 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional
 import threading
 
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
+# LM Studio (and any OpenAI-compatible /embeddings endpoint) is reached through
+# book writer's shared AI suite, like every AI call in the workspace. The local
+# sentence-transformers path runs in-process and needs no provider at all.
+BOOK_WRITER = os.environ.get("ATLAS_BOOK_WRITER") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "book writer")
+
+
+def _book_writer_ai_service():
+    import sys
+    if BOOK_WRITER not in sys.path:
+        sys.path.insert(0, BOOK_WRITER)
+    from ai_book_creator.services import ai_service
+    return ai_service
+
+
+def shared_embedding_service(base_url: str, api_key: str, model_name: str):
+    """book writer's AIService pointed at an OpenAI-compatible embeddings endpoint."""
+    state = tempfile.gettempdir()
+    overrides = {
+        "provider": "openrouter", "base_url": base_url, "api_key": api_key, "writing_model": model_name,
+        "groq_rate_state_path": os.path.join(state, "story_atlas_groq.json"),
+    }
+    return _book_writer_ai_service().AIService(
+        None, os.path.join(state, "story_atlas_ai_usage.json"), allow_auth_prompt=False,
+        client_max_retries=2, config_overrides=overrides)
 
 try:
     import umap
@@ -151,18 +172,12 @@ class EmbeddingsManager:
     def load_model(self):
         if self.model is None:
             if self.embedding_provider == "lm_studio":
-                if OpenAI is None:
-                    raise ImportError(
-                        "openai is required for LM Studio embeddings. Install it with `pip install openai`."
-                    )
                 self._emit_status(
                     f"Connecting to LM Studio embeddings at {self.lm_studio_base_url} "
                     f"using model {self.model_name}..."
                 )
-                self._lm_studio_client = OpenAI(
-                    base_url=self.lm_studio_base_url,
-                    api_key=self.lm_studio_api_key,
-                )
+                self._lm_studio_client = shared_embedding_service(
+                    self.lm_studio_base_url, self.lm_studio_api_key, self.model_name)
                 self.model = self._lm_studio_client
                 self._emit_status("LM Studio embedding client ready!")
             else:
@@ -287,11 +302,7 @@ class EmbeddingsManager:
                     f"Encoding {len(batch)} texts via LM Studio "
                     f"(batch {(batch_index // batch_size) + 1}/{total_batches})..."
                 )
-                response = self.model.embeddings.create(
-                    input=batch,
-                    model=self.model_name,
-                )
-                embeddings.extend(item.embedding for item in response.data)
+                embeddings.extend(self.model.embed(batch, model=self.model_name))
                 if pbar:
                     pbar.update(1)
 
@@ -399,11 +410,8 @@ class EmbeddingsManager:
             f"Query: {query}"
         )
         if self.embedding_provider == "lm_studio":
-            response = self.model.embeddings.create(
-                input=[query_text.replace("\n", " ")],
-                model=self.model_name,
-            )
-            return np.array(response.data[0].embedding, dtype=np.float32)
+            vector = self.model.embed([query_text.replace("\n", " ")], model=self.model_name)[0]
+            return np.array(vector, dtype=np.float32)
 
         try:
             return self.model.encode(query_text, prompt_name="query")
