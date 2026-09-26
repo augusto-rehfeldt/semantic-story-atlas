@@ -7,7 +7,7 @@ import time
 import tempfile
 from urllib.parse import quote
 import numpy as np
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 import threading
 
 # LM Studio (and any OpenAI-compatible /embeddings endpoint) is reached through
@@ -32,17 +32,19 @@ def shared_embedding_service(base_url: str, api_key: str, model_name: str):
     state = tempfile.gettempdir()
     overrides = {
         "provider": "openrouter", "base_url": base_url, "api_key": api_key, "writing_model": model_name,
-        "groq_rate_state_path": os.path.join(state, "story_atlas_groq.json"),
+        "groq_rate_state_path": os.path.join(state, "shelfscape_groq.json"),
     }
     return _suite_service_module().AIService(
-        None, os.path.join(state, "story_atlas_ai_usage.json"), allow_auth_prompt=False,
+        None, os.path.join(state, "shelfscape_ai_usage.json"), allow_auth_prompt=False,
         client_max_retries=2, config_overrides=overrides)
 
+# umap drags numba in (seconds of import); only look for it here, import it when fitting.
 try:
-    import umap
-    HAS_UMAP = True
-except ImportError:
+    import importlib.util
+    HAS_UMAP = importlib.util.find_spec("umap") is not None
+except (ImportError, ValueError):
     HAS_UMAP = False
+if not HAS_UMAP:
     print("UMAP not available, falling back to PCA")
 
 try:
@@ -91,17 +93,35 @@ def build_cache_stem(provider: str, model_name: str) -> str:
     return f"{provider_slug}_{model_slug}"
 
 
-def atomic_json(path, value):
+def atomic_write(path, write, mode='w'):
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+        with tempfile.NamedTemporaryFile(mode=mode, encoding=None if 'b' in mode else 'utf-8',
                                          dir=os.path.dirname(os.path.abspath(path)), delete=False) as stream:
             temporary = stream.name
-            json.dump(value, stream)
+            write(stream)
         os.replace(temporary, path)
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def atomic_json(path, value):
+    atomic_write(path, lambda stream: json.dump(value, stream))
+
+
+# Similarity bands for the radial layout: band 0 is 90%+, band 9 is under 10%.
+BAND_RADII = np.array([0.08, 0.18, 0.28, 0.38, 0.48, 0.58, 0.68, 0.78, 0.88, 0.96])
+
+
+def radial_layout(similarities: np.ndarray) -> np.ndarray:
+    """Place descending similarities on concentric rings, spread evenly around each ring."""
+    band = np.clip(9 - np.floor(similarities * 10 + 1e-9).astype(int), 0, 9)
+    ordinal = np.arange(len(band)) - np.searchsorted(band, band)  # position inside its band
+    count = np.bincount(band, minlength=10)[band]
+    angle = np.where(count > 1, 2 * np.pi * ordinal / np.maximum(count, 1), 0.0) + band * 0.4
+    radius = BAND_RADII[band] + 0.03 * np.sin(ordinal * 2.5)
+    return np.stack([radius * np.cos(angle), radius * np.sin(angle)], axis=1)
 
 
 class EmbeddingsManager:
@@ -125,7 +145,10 @@ class EmbeddingsManager:
         ),
     ):
         self.stories_folder = stories_folder
-        self.cache_file = cache_file
+        # Embeddings live in a float32 .npz; a legacy JSON cache of the same stem is read once.
+        stem = os.path.splitext(cache_file)[0]
+        self.cache_file = stem + ".npz"
+        self.legacy_cache_file = stem + ".json"
         self.projection_cache_file = projection_cache_file
         self.encoding_mode = encoding_mode
         self.max_batch_size = max_batch_size
@@ -154,7 +177,6 @@ class EmbeddingsManager:
         self.story_keys = []
         self.story_index: Dict[str, int] = {}  # O(1) key -> index lookup
         self.projections_2d = None
-        self.reducer = None
         self._lock = threading.Lock()
         self.status_callback = None
         self.is_loading = False
@@ -195,23 +217,34 @@ class EmbeddingsManager:
         with open(filepath, "rb") as f:
             return hashlib.md5(f.read()).hexdigest()
 
-    def _load_cache(self) -> Dict:
-        if os.path.exists(self.cache_file):
-            try:
+    def _load_cache(self) -> Dict[str, np.ndarray]:
+        """Cache key -> embedding vector."""
+        try:
+            if os.path.exists(self.cache_file):
                 self._emit_status("Loading cached embeddings...")
-                with open(self.cache_file, "r") as f:
-                    cache = json.load(f)
-                self._emit_status(f"Found {len(cache)} cached embeddings")
-                return cache
-            except Exception as e:
-                self._emit_status(f"Cache load failed: {e}")
+                with np.load(self.cache_file) as data:
+                    cache = dict(zip(data["keys"].tolist(), data["matrix"]))
+            elif os.path.exists(self.legacy_cache_file):
+                self._emit_status("Converting legacy JSON embedding cache...")
+                with open(self.legacy_cache_file, "r") as f:
+                    cache = {key: np.asarray(value["embedding"], dtype=np.float32)
+                             for key, value in json.load(f).items()}
+            else:
+                self._emit_status("No embedding cache found, will generate fresh embeddings")
                 return {}
-        self._emit_status("No embedding cache found, will generate fresh embeddings")
-        return {}
+        except Exception as e:
+            self._emit_status(f"Cache load failed: {e}")
+            return {}
+        self._emit_status(f"Found {len(cache)} cached embeddings")
+        return cache
 
-    def _save_cache(self, cache: Dict):
+    def _save_cache(self, cache: Dict[str, np.ndarray]):
         self._emit_status(f"Saving {len(cache)} embeddings to cache...")
-        atomic_json(self.cache_file, cache)
+        keys = list(cache)
+        matrix = np.array([cache[key] for key in keys], dtype=np.float32)
+        atomic_write(self.cache_file, lambda stream: np.savez(stream, keys=np.array(keys), matrix=matrix), 'wb')
+        if os.path.exists(self.legacy_cache_file):
+            os.remove(self.legacy_cache_file)
         self._emit_status("Embeddings cached successfully!")
 
     def _load_projection_cache(self) -> Optional[Dict]:
@@ -428,6 +461,7 @@ class EmbeddingsManager:
 
     def _create_reducer(self):
         if HAS_UMAP and len(self.story_keys) > 3:
+            import umap
             return umap.UMAP(
                 n_components=2,
                 n_neighbors=min(15, len(self.story_keys) - 1),
@@ -438,25 +472,23 @@ class EmbeddingsManager:
         pca_cls = _get_pca()
         return pca_cls(n_components=2, random_state=42)
 
-    def _normalize_projections(self, projections: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _normalize_projections(projections: np.ndarray) -> np.ndarray:
         """Normalize projections to [-1, 1] range."""
         min_vals = projections.min(axis=0)
         max_vals = projections.max(axis=0)
-        self.projection_min = min_vals
-        self.projection_span = np.where(max_vals > min_vals, max_vals - min_vals, 1)
-        return 2 * (projections - min_vals) / self.projection_span - 1
+        span = np.where(max_vals > min_vals, max_vals - min_vals, 1)
+        return 2 * (projections - min_vals) / span - 1
 
     def _compute_2d_projections(self):
         if len(self.story_keys) < 2:
             self.projections_2d = np.zeros((len(self.story_keys), 2))
-            self.reducer = None
             return
         method = "UMAP" if HAS_UMAP else "PCA"
         self._emit_status(f"Computing 2D projections using {method}...")
 
-        self.reducer = self._create_reducer()
         self.projections_2d = self._normalize_projections(
-            self.reducer.fit_transform(self.embeddings_matrix)
+            self._create_reducer().fit_transform(self.embeddings_matrix)
         )
 
         projection_data = {
@@ -465,21 +497,6 @@ class EmbeddingsManager:
         }
         self._save_projection_cache(projection_data)
         self._emit_status("2D projections computed and cached!")
-
-    def project_query(self, query_embedding: np.ndarray) -> Tuple[float, float]:
-        if self.reducer is None:
-            return (0.0, 0.0)
-
-        try:
-            projection = self.reducer.transform(query_embedding.reshape(1, -1))[0]
-
-            projection = 2 * (projection - self.projection_min) / self.projection_span - 1
-            projection = np.clip(projection, -1.2, 1.2)
-
-            return (float(projection[0]), float(projection[1]))
-        except Exception as e:
-            print(f"[ERROR] Failed to project query: {e}")
-            return (0.0, 0.0)
 
     def _build_index(self):
         """Build lookup structures after stories are loaded."""
@@ -640,11 +657,6 @@ class EmbeddingsManager:
                     or ""
                 )
 
-                self._emit_status(
-                    f"Queued CSV row {row_index}: {title}"
-                    + (f" by {author}" if author else "")
-                )
-
                 yield {
                     "source_filename": filename,
                     "story_id": normalized.get('id') or f"{base_name}_{row_index:04d}",
@@ -673,7 +685,6 @@ class EmbeddingsManager:
             self.story_keys = []
             self.story_index = {}
             self.projections_2d = None
-            self.reducer = None
 
             self._emit_status("Starting to load stories...")
             self.load_model()
@@ -698,23 +709,15 @@ class EmbeddingsManager:
             new_embeddings_count = 0
             cached_embeddings_count = 0
 
-            for idx, record in enumerate(story_records):
+            for record in story_records:
                 cache_key = hashlib.sha256(json.dumps([
                     self.embedding_provider, self.model_name, self._build_embedding_text(record)
                 ], ensure_ascii=False).encode('utf-8')).hexdigest()
-                if cache_key in cache:
-                    embedding = np.array(cache[cache_key]["embedding"])
-                    cached_embeddings_count += 1
-                    story_entries.append(
-                        {"record": record, "cache_key": cache_key, "embedding": embedding}
-                    )
-                else:
-                    self._emit_status(
-                        f"Queueing embedding for: {record['title']} ({idx+1}/{len(story_records)})"
-                    )
-                    story_entries.append(
-                        {"record": record, "cache_key": cache_key, "embedding": None}
-                    )
+                embedding = cache.get(cache_key)
+                cached_embeddings_count += embedding is not None
+                story_entries.append(
+                    {"record": record, "cache_key": cache_key, "embedding": embedding}
+                )
 
             uncached_entries = [entry for entry in story_entries if entry["embedding"] is None]
 
@@ -736,14 +739,7 @@ class EmbeddingsManager:
             for entry in story_entries:
                 if entry["embedding"] is None:
                     continue
-                updated_cache[entry["cache_key"]] = {
-                    "embedding": (
-                        entry["embedding"].tolist()
-                        if isinstance(entry["embedding"], np.ndarray)
-                        else entry["embedding"]
-                    ),
-                    "title": entry["record"]["title"],
-                }
+                updated_cache[entry["cache_key"]] = entry["embedding"]
                 story_data = {
                     "title": entry["record"]["title"],
                     "content": (
@@ -772,7 +768,9 @@ class EmbeddingsManager:
             if new_embeddings_count > 0:
                 self._emit_status(f"Generated {new_embeddings_count} new embeddings")
 
-            self._save_cache(updated_cache)
+            # Rewriting ~100 MB of vectors on every boot is most of a warm start; skip it.
+            if new_embeddings_count or set(updated_cache) != set(cache) or not os.path.exists(self.cache_file):
+                self._save_cache(updated_cache)
             self._build_index()
 
             self.dataset_fingerprint = hashlib.sha256(json.dumps([
@@ -789,10 +787,6 @@ class EmbeddingsManager:
                 self.projections_2d = np.array(
                     [projection_cache['positions'][key] for key in self.story_keys]
                 )
-                self._emit_status("Fitting reducer for query projection...")
-                self.reducer = self._create_reducer()
-                self._normalize_projections(self.reducer.fit_transform(self.embeddings_matrix))
-                self._emit_status("Reducer fitted successfully!")
             else:
                 self._compute_2d_projections()
 
@@ -837,8 +831,16 @@ class EmbeddingsManager:
             meta["cover_url"] = self._cover_url_for_story(key)
         return meta
 
+    @staticmethod
+    def _excerpt(text: str, limit: int = 280) -> str:
+        """Plain-text opening of a (possibly Markdown) summary, without its heading lines."""
+        lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        plain = re.sub(r"[*_`>]+", "", " ".join(lines)).strip()
+        return plain if len(plain) <= limit else plain[:limit].rsplit(" ", 1)[0] + "…"
+
     def get_all_stories(self) -> List[Dict]:
-        """Get all stories with their fixed 2D positions."""
+        """Get all stories with their fixed 2D positions; summaries are cut to an excerpt
+        (the full one is served by /api/story/<id>), or a big library ships tens of MB."""
         if not self.is_ready or self.projections_2d is None:
             return []
         results = []
@@ -847,147 +849,28 @@ class EmbeddingsManager:
             entry = {
                 "id": key,
                 "title": story["title"],
-                "content": story["content"][:200] + "...",
-                "filename": key,
                 "position": self._get_story_position(key),
             }
             entry.update(self._story_metadata(key))
+            entry["excerpt"] = self._excerpt(entry.pop("summary", "") or story["content"])
             results.append(entry)
         return results
 
-    def _compute_all_similarities(self, query: str) -> List[Tuple[int, str, float]]:
-        """Compute cosine similarities between query and all stories (vectorized)."""
-        query_embedding = self._encode_query(query)
-        query_norm = query_embedding / np.linalg.norm(query_embedding)
-
-        # Vectorized cosine similarity: dot product of normalized vectors
-        similarities = self.normalized_matrix @ query_norm
-
-        results = [
-            (i, key, float(similarities[i]))
-            for i, key in enumerate(self.story_keys)
-        ]
-        results.sort(key=lambda x: x[2], reverse=True)
-        return results, query_embedding
-
-    def compute_similarity(self, query: str) -> List[Tuple[str, float]]:
-        """Compute similarity scores for all stories (non-streaming)."""
+    def search(self, query: str) -> List[Dict]:
+        """Rank every story against the query, best first, with its radial layout position."""
         with self._lock:
-            results, _ = self._compute_all_similarities(query)
-            return [(key, sim) for _, key, sim in results]
-
-    def compute_similarity_streaming(self, query: str, delay_factor: float = 1.0):
-        """Generator that yields similarity results one at a time."""
-        with self._lock:
-            all_similarities, query_embedding = self._compute_all_similarities(query)
-            total_stories = len(all_similarities)
-
-            # Project query to 2D
-            query_position = self.project_query(query_embedding)
-            qx, qy = query_position
-
-            # Yield query position first
-            yield {
-                "type": "query_position",
-                "position": {"x": qx, "y": qy},
+            query_embedding = np.asarray(self._encode_query(query), dtype=np.float32)
+        norm = np.linalg.norm(query_embedding)
+        similarities = self.normalized_matrix @ (query_embedding / (norm or 1))
+        order = np.argsort(-similarities, kind="stable")
+        ranked = similarities[order]
+        radial = radial_layout(ranked)
+        return [
+            {
+                "id": self.story_keys[index],
+                "similarity": round(float(similarity), 4),
+                "rank": rank + 1,
+                "radialPosition": {"x": round(float(x), 4), "y": round(float(y), 4)},
             }
-
-            # Group stories by similarity bands for radial positioning
-            bands = self._group_into_bands(all_similarities)
-            results = []
-
-            # Yield results one by one
-            for rank, (original_idx, key, similarity) in enumerate(all_similarities):
-                radial_x, radial_y = self._compute_radial_position_banded(
-                    key=key, bands=bands
-                )
-
-                result = {
-                    "id": key,
-                    "title": self.stories[key]["title"],
-                    "content": self.stories[key]["content"][:200] + "...",
-                    "similarity": similarity,
-                    "originalPosition": {
-                        "x": float(self.projections_2d[original_idx][0]),
-                        "y": float(self.projections_2d[original_idx][1]),
-                    },
-                    "radialPosition": {"x": radial_x, "y": radial_y},
-                    "rank": rank + 1,
-                }
-                result.update(self._story_metadata(key))
-                results.append(result)
-
-                yield {
-                    "type": "update",
-                    "story": result,
-                    "progress": (rank + 1) / total_stories,
-                    "processed": rank + 1,
-                    "total": total_stories,
-                }
-
-            # Final complete result
-            yield {
-                "type": "complete",
-                "results": results,
-                "query_position": {"x": qx, "y": qy},
-            }
-
-    def _group_into_bands(self, sorted_similarities: list) -> Dict:
-        """Group stories into similarity bands for radial layout."""
-        band_definitions = [
-            (0.9, 1.0, 0.08),   # 90%+   : innermost ring
-            (0.8, 0.9, 0.18),   # 80-90% : second ring
-            (0.7, 0.8, 0.28),   # 70-80% : third ring
-            (0.6, 0.7, 0.38),   # 60-70% : fourth ring
-            (0.5, 0.6, 0.48),   # 50-60% : fifth ring
-            (0.4, 0.5, 0.58),   # 40-50% : sixth ring
-            (0.3, 0.4, 0.68),   # 30-40% : seventh ring
-            (0.2, 0.3, 0.78),   # 20-30% : eighth ring
-            (0.1, 0.2, 0.88),   # 10-20% : ninth ring
-            (0.0, 0.1, 0.96),   # 0-10%  : outermost ring
+            for rank, (index, similarity, (x, y)) in enumerate(zip(order, ranked, radial))
         ]
-
-        bands = {i: [] for i in range(len(band_definitions))}
-        story_band_map = {}
-
-        for original_idx, key, similarity in sorted_similarities:
-            for band_idx, (min_sim, max_sim, radius) in enumerate(band_definitions):
-                if min_sim <= similarity < max_sim or (
-                    band_idx == 0 and similarity >= max_sim
-                ):
-                    bands[band_idx].append((key, similarity))
-                    story_band_map[key] = (band_idx, len(bands[band_idx]) - 1)
-                    break
-
-        return {
-            "definitions": band_definitions,
-            "bands": bands,
-            "story_map": story_band_map,
-        }
-
-    def _compute_radial_position_banded(
-        self, key: str, bands: Dict
-    ) -> Tuple[float, float]:
-        """Compute position in a circular band layout."""
-        story_map = bands["story_map"]
-        if key not in story_map:
-            return (0.0, 0.0)
-
-        band_idx, position_in_band = story_map[key]
-        _, _, base_radius = bands["definitions"][band_idx]
-        total_in_band = len(bands["bands"][band_idx])
-
-        if total_in_band == 0:
-            return (0.0, 0.0)
-
-        band_offset = band_idx * 0.4
-
-        if total_in_band == 1:
-            angle = band_offset
-        else:
-            angle = (2 * np.pi * position_in_band / total_in_band) + band_offset
-
-        radius_variation = 0.03 * np.sin(position_in_band * 2.5)
-        radius = base_radius + radius_variation
-
-        return (float(radius * np.cos(angle)), float(radius * np.sin(angle)))

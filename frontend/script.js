@@ -19,6 +19,24 @@ function generateCover(title) {
     return { emoji, colors };
 }
 
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
+}
+
+function renderMarkdown(text) {
+    const inline = html => html
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>');
+    return esc(text).split(/\n\s*\n/).map(block => {
+        if (/^#\s/.test(block.trim())) return ''; // the title heading repeats the panel header
+        const heading = block.trim().match(/^#{1,6}\s+(.*)$/);
+        if (heading) return `<h4>${inline(heading[1])}</h4>`;
+        return block.trim() ? `<p>${inline(block.trim()).replace(/\n/g, '<br>')}</p>` : '';
+    }).join('');
+}
+
 function normalizeSeriesKey(series, author = '') {
     return `${(series || '').trim().toLowerCase()}::${(author || '').trim().toLowerCase()}`;
 }
@@ -38,20 +56,6 @@ function formatAuthors(authorStr, max = 2) {
 function parseSeriesIndex(value) {
     const parsed = Number.parseFloat(value);
     return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
-}
-
-function getStorySimilarity(storyId) {
-    const result = currentResults.get(storyId);
-    return result ? result.similarity : null;
-}
-
-function getStoryRank(storyId) {
-    const result = currentResults.get(storyId);
-    return result ? result.rank : null;
-}
-
-function getStoryDisplayGroupId(storyId) {
-    return storyToGroupId.get(storyId) || storyId;
 }
 
 const KEEP_IN_VIEW_MARGIN = 12;
@@ -318,11 +322,6 @@ function sortGroupMembers(group) {
     return members;
 }
 
-function getGroupPrimaryStory(group) {
-    const members = sortGroupMembers(group);
-    return members[0] || null;
-}
-
 function getGroupBestResult(group) {
     let best = null;
     for (const member of group.members) {
@@ -335,19 +334,13 @@ function getGroupBestResult(group) {
     return best;
 }
 
-function getGroupSortValue(group) {
-    const best = getGroupBestResult(group);
-    if (best) {
-        return best.similarity;
-    }
-    return -group.firstIndex;
-}
-
 // State
 let allStories = [];
 let storyPositions = new Map(); // id -> {x, y} - current animated positions
 let originalPositions = new Map(); // id -> {x, y} - original fixed positions  
-let radialPositions = new Map(); // id -> {x, y} - radial positions around query center
+let storyById = new Map(); // id -> story
+let topResults = []; // best matches of the current search, best first
+let storyDetails = new Map(); // id -> full story from /api/story/<id>
 let storyMotionStates = new Map(); // id -> {from, to, startTime, duration}
 let displayGroups = [];
 let groupElements = new Map(); // group id -> DOM element
@@ -359,8 +352,7 @@ let queryPosition = null;
 let graphCanvas, graphCtx;
 let animationFrameId = null;
 let graphVisualScale = 1;
-let activeEventSource = null;
-let searchGeneration = 0;
+let searchController = null;
 
 // Animation state
 let animationDuration = 180;
@@ -392,30 +384,33 @@ let appSettings = { ...SETTINGS_DEFAULTS };
 
 function loadSettings() {
   try {
-    const saved = localStorage.getItem('storyAtlasSettings');
+    const saved = localStorage.getItem('shelfscapeSettings');
     if (saved) appSettings = { ...SETTINGS_DEFAULTS, ...JSON.parse(saved) };
   } catch (_) {}
 }
 
 function saveSettings() {
   try {
-    localStorage.setItem('storyAtlasSettings', JSON.stringify(appSettings));
+    localStorage.setItem('shelfscapeSettings', JSON.stringify(appSettings));
   } catch (_) {}
-}
-
-function getVisibleGraphStories() {
-  return allStories;
 }
 
 function getVisibleCardStories() {
   if (currentResults.size > 0) {
-    const sorted = Array.from(currentResults.values()).sort((a, b) => b.similarity - a.similarity);
-    const topIds = new Set(sorted.slice(0, appSettings.maxCards).map(r => r.id));
-    return allStories.filter(s => topIds.has(s.id));
+    // currentResults is filled best first, so this is rank order.
+    return Array.from(currentResults.keys()).slice(0, appSettings.maxCards)
+      .map(id => storyById.get(id)).filter(Boolean);
   }
-  return allStories.length <= appSettings.maxCards
-    ? allStories
-    : allStories.slice(0, appSettings.maxCards);
+  return allStories.slice(0, appSettings.maxCards);
+}
+
+function updateLibrarySubtitle() {
+  if (!librarySubtitle || !allStories.length) return;
+  const total = allStories.length.toLocaleString();
+  const showing = getVisibleCardStories().length.toLocaleString();
+  librarySubtitle.textContent = allStories.length > appSettings.maxCards
+    ? `Showing top ${showing} of ${total} books`
+    : `Browse ${total} books by semantic similarity`;
 }
 
 // Initialize
@@ -659,11 +654,7 @@ function drawGraph() {
  const centerX = scale.centerX;
  const centerY = scale.centerY;
 
- const sortedResults = Array.from(currentResults.values())
- .sort((a, b) => b.similarity - a.similarity)
- .slice(0, 10);
-
- sortedResults.forEach((result) => {
+ topResults.forEach((result) => {
  const pos = storyPositions.get(result.id);
  if (!pos) return;
 
@@ -708,10 +699,31 @@ function drawGraph() {
   graphCtx.fill();
   graphCtx.stroke();
 
-  // Draw result dots with full styling (colored, sized by similarity)
+  // Result dots: one path per similarity bucket (21 fills instead of one per book).
+  const buckets = new Map();
   resultStories.forEach(story => {
-    if (story.id === selectedStoryId) { selectedStory = story; return; }
-    drawStoryPoint(story, width, height, padding, false, overlayAnnotations);
+    const bucket = Math.max(0, Math.round(currentResults.get(story.id).similarity * 20));
+    if (!buckets.has(bucket)) buckets.set(bucket, []);
+    buckets.get(bucket).push(story);
+  });
+  buckets.forEach((stories, bucket) => {
+    const similarity = bucket / 20;
+    const hue = 120 * similarity;
+    const radius = (4.5 + similarity * 4.5) * graphVisualScale;
+    graphCtx.fillStyle = `hsla(${hue}, 72%, 48%, 0.96)`;
+    graphCtx.strokeStyle = `hsla(${hue}, 72%, 30%, 0.9)`;
+    graphCtx.lineWidth = defaultLineWidth;
+    graphCtx.beginPath();
+    stories.forEach(story => {
+      const pos = storyPositions.get(story.id);
+      if (!pos) return;
+      const x = scale.centerX + pos.x * scale.radius;
+      const y = scale.centerY + pos.y * scale.radius;
+      graphCtx.moveTo(x + radius, y);
+      graphCtx.arc(x, y, radius, 0, Math.PI * 2);
+    });
+    graphCtx.fill();
+    graphCtx.stroke();
   });
 
  // Draw query point / center
@@ -1048,11 +1060,11 @@ function handleGraphMouseMove(e) {
 
  if (closestStory) {
  const result = currentResults.get(closestStory.id);
- const origPos = originalPositions.get(closestStory.id);
+ const author = getStoryAuthor(closestStory);
  graphTooltip.innerHTML = `
- <strong>${closestStory.title}</strong>
+ <strong>${esc(closestStory.title)}</strong>
+ ${author ? `<br><span style="color: #94a3b8;">${esc(formatAuthors(author))}</span>` : ''}
  ${result ? `<br><span style="color: #10b981;">Match: ${(result.similarity * 100).toFixed(1)}%</span>` : ''}
- ${origPos ? `<br><span style="color: #94a3b8; font-size: 0.8em;">x ${origPos.x.toFixed(3)}, y ${origPos.y.toFixed(3)}</span>` : ''}
  `;
         graphTooltip.style.left = `${e.clientX + 15}px`;
         graphTooltip.style.top = `${e.clientY + 15}px`;
@@ -1095,15 +1107,13 @@ function handleGraphClick(e) {
     });
 
     if (clickedStory) {
-        selectStory(clickedStory.id, { source: 'graph' });
+        selectStory(clickedStory.id);
     } else {
         deselectStory();
     }
 }
 
-function selectStory(storyId, options = {}) {
-    const { force = false, source = 'ui' } = options;
-
+function selectStory(storyId) {
     if (selectedStoryId) {
         const prevCard = storyElements.get(selectedStoryId);
         if (prevCard) {
@@ -1118,17 +1128,9 @@ function selectStory(storyId, options = {}) {
         scrollElementIntoViewIfNeeded(card);
     }
 
-    const story = allStories.find(s => s.id === storyId);
-    const result = currentResults.get(storyId);
-
-    console.info('[SELECT] Showing story:', {
-        source,
-        force,
-        storyId,
-        title: story ? story.title : null,
-        series: story ? story.series : null,
-    });
-    renderGraphSummary(story, result);
+    const story = storyById.get(storyId);
+    renderGraphSummary(story, currentResults.get(storyId));
+    loadStoryDetails(storyId);
   markGraphDirty();
 }
 
@@ -1162,21 +1164,19 @@ function renderGraphSummary(story, result) {
     const author = getStoryAuthor(story);
     if (story.series) {
         const seriesLabel = story.series_index ? `${story.series} #${story.series_index}` : story.series;
-        metaParts.push(`<span class="meta-tag">${seriesLabel}</span>`);
+        metaParts.push(`<span class="meta-tag">${esc(seriesLabel)}</span>`);
     }
-    if (story.genre) metaParts.push(`<span class="meta-tag">${story.genre}</span>`);
-    if (story.year) metaParts.push(`<span class="meta-tag">${story.year}</span>`);
+    if (story.genre) metaParts.push(`<span class="meta-tag">${esc(story.genre)}</span>`);
+    if (story.year) metaParts.push(`<span class="meta-tag">${esc(story.year)}</span>`);
 
     const seriesMembers = getSeriesMembers(story);
 
- const previewText = story.summary || story.content || 'No summary available.';
+ const details = storyDetails.get(story.id);
+ const previewHTML = details
+ ? renderMarkdown(details.summary || details.content || 'No summary available.')
+ : `<p>${esc(story.excerpt || 'No summary available.')}</p>`;
  const coverHTML = story.cover_url
- ? `<img class="summary-cover" src="${story.cover_url}" alt="${story.title}" loading="lazy">`
- : '';
-
- const origPos = originalPositions.get(story.id);
- const coordsHTML = origPos
- ? `<span class="meta-tag" title="Embedding space coordinates">x ${origPos.x.toFixed(3)}, y ${origPos.y.toFixed(3)}</span>`
+ ? `<img class="summary-cover" src="${esc(story.cover_url)}" alt="${esc(story.title)}" loading="lazy">`
  : '';
 
     graphInfo.innerHTML = `
@@ -1186,9 +1186,9 @@ function renderGraphSummary(story, result) {
                     ${coverHTML}
                     <div class="summary-title-block">
                         <div class="summary-kicker">Selected Story</div>
-                        <div class="summary-title">${story.title}</div>
- ${author ? `<div class="summary-author">by ${formatAuthors(author)}</div>` : ''}
- <div class="summary-meta">${metaParts.join(' ')} ${coordsHTML}</div>
+                        <div class="summary-title">${esc(story.title)}</div>
+ ${author ? `<div class="summary-author">by ${esc(formatAuthors(author))}</div>` : ''}
+ <div class="summary-meta">${metaParts.join(' ')}</div>
                     </div>
                 </div>
                 ${result ? `
@@ -1199,21 +1199,21 @@ function renderGraphSummary(story, result) {
                 ` : ''}
             </div>
             <div class="summary-body">
-                <div class="summary-excerpt">${previewText}</div>
+                <div class="summary-excerpt">${previewHTML}</div>
                 ${seriesMembers.length ? `
                     <div class="summary-series-list">
                         <div class="summary-series-label">Other books in this series</div>
                         ${seriesMembers.map(entry => `
-                            <button type="button" class="summary-series-item" data-story-id="${entry.story.id}">
-                                <span class="summary-series-item-title">${entry.story.title}</span>
-                                <span class="summary-series-item-meta">${entry.story.series_index ? `Book ${entry.story.series_index}` : 'Book'}${entry.result ? ` · ${(entry.result.similarity * 100).toFixed(1)}%` : ''}</span>
+                            <button type="button" class="summary-series-item" data-story-id="${esc(entry.story.id)}">
+                                <span class="summary-series-item-title">${esc(entry.story.title)}</span>
+                                <span class="summary-series-item-meta">${entry.story.series_index ? `Book ${esc(entry.story.series_index)}` : 'Book'}${entry.result ? ` · ${(entry.result.similarity * 100).toFixed(1)}%` : ''}</span>
                             </button>
                         `).join('')}
                     </div>
                 ` : ''}
             </div>
             <div class="summary-footer">
-                ${story.series ? `<div class="summary-series">${story.series_index ? `Book ${story.series_index} in ${story.series}` : story.series}</div>` : '<div></div>'}
+                ${story.series ? `<div class="summary-series">${esc(story.series_index ? `Book ${story.series_index} in ${story.series}` : story.series)}</div>` : '<div></div>'}
                 <div></div>
             </div>
         </div>
@@ -1221,7 +1221,7 @@ function renderGraphSummary(story, result) {
 
     graphInfo.querySelectorAll('.summary-series-item').forEach(button => {
         button.addEventListener('click', () => {
-            selectStory(button.dataset.storyId, { force: true, source: 'summary-series-item' });
+            selectStory(button.dataset.storyId);
         });
     });
 
@@ -1230,6 +1230,22 @@ function renderGraphSummary(story, result) {
     if (summaryBody) {
         summaryBody.scrollTop = 0;
     }
+}
+
+// The listing only carries an excerpt; the full summary is fetched when a story is opened.
+async function loadStoryDetails(storyId) {
+    if (storyDetails.has(storyId)) return;
+    try {
+        const response = await fetch(`${API_BASE}/story/${encodeURIComponent(storyId)}`);
+        if (!response.ok) return;
+        storyDetails.set(storyId, await response.json());
+    } catch (_) {
+        return;
+    }
+    if (selectedStoryId !== storyId) return;
+    const body = graphInfo.querySelector('.summary-excerpt');
+    const details = storyDetails.get(storyId);
+    if (body) body.innerHTML = renderMarkdown(details.summary || details.content || 'No summary available.');
 }
 
 // ==================== STORIES LOADING ====================
@@ -1252,7 +1268,7 @@ async function loadStories() {
             const loadedCount = (health.stories_loaded || 0).toLocaleString();
             showStatus(`⏳ Loading library • ${loadedCount} stories indexed so far`, 'info');
             console.info(`[LOAD] Backend is still loading (${loadedCount} indexed so far). Retrying in 2s.`);
-            setTimeout(loadStories, 2000);
+            setTimeout(loadStories, 1000);
             return;
         }
 
@@ -1283,14 +1299,9 @@ async function loadStories() {
         }
 
   allStories = data.stories;
-  if (librarySubtitle) {
-    const total = (data.count || 0).toLocaleString();
-    const showing = getVisibleCardStories().length.toLocaleString();
-    librarySubtitle.textContent = allStories.length > appSettings.maxCards
-      ? `Showing top ${showing} of ${total} books`
-      : `Browse ${total} books by semantic similarity`;
-  }
-        document.title = `Semantic Story Atlas • ${(data.count || 0).toLocaleString()} books`;
+  storyById = new Map(allStories.map(story => [story.id, story]));
+  updateLibrarySubtitle();
+        document.title = `Shelfscape • ${(data.count || 0).toLocaleString()} books`;
 
         // Store positions
         allStories.forEach(story => {
@@ -1298,7 +1309,6 @@ async function loadStories() {
                 const pos = { x: story.position.x, y: story.position.y };
                 storyPositions.set(story.id, { ...pos });
                 originalPositions.set(story.id, { ...pos });
-                radialPositions.set(story.id, { ...pos }); // Initially same as original
             }
         });
 
@@ -1372,30 +1382,16 @@ function renderStories(stories, withAnimation = true) {
   });
 }
 
-function refreshGroupCardForStory(storyId) {
-  const groupId = getStoryDisplayGroupId(storyId);
-  const group = displayGroups.find(item => item.id === groupId);
-  const card = groupElements.get(groupId);
-  if (!group || !card) return;
-
-  if (group.type === 'series') {
-    renderSeriesGroupCard(card, group, group.firstIndex);
-  } else {
-    renderSingleStoryCard(card, group.members[0], group.firstIndex);
-  }
-  card.classList.add('rendered');
-}
-
 function renderSingleStoryCard(card, story, index) {
     const wasVisible = card.classList.contains('visible');
     const cover = generateCover(story.title);
     const result = currentResults.get(story.id);
 
-    const excerptText = (story.summary || story.content || '').trim();
+    const excerptText = (story.excerpt || '').trim();
     const coverStyle = story.cover
         ? `background-image:
                 linear-gradient(180deg, rgba(15, 23, 42, 0.05) 0%, rgba(15, 23, 42, 0.18) 48%, rgba(15, 23, 42, 0.88) 100%),
-                url('${story.cover_url || `${API_BASE}/covers/${encodeURIComponent(story.cover)}`}');`
+                url('${esc(story.cover_url || `${API_BASE}/covers/${encodeURIComponent(story.cover)}`)}');`
         : `background-image:
                 linear-gradient(180deg, rgba(15, 23, 42, 0.08) 0%, rgba(15, 23, 42, 0.2) 48%, rgba(15, 23, 42, 0.92) 100%),
                 linear-gradient(135deg, ${cover.colors[0]}, ${cover.colors[1]});`;
@@ -1407,13 +1403,13 @@ function renderSingleStoryCard(card, story, index) {
         <div class="story-card-visual ${story.cover ? 'has-image' : 'has-gradient'}" style="${coverStyle}">
             <div class="story-card-overlay">
                 <div class="story-card-overlay-header">
-                    <h3 class="story-title">${story.title}</h3>
-                    ${getStoryAuthor(story) ? `<div class="story-author">by ${formatAuthors(getStoryAuthor(story))}</div>` : ''}
+                    <h3 class="story-title">${esc(story.title)}</h3>
+                    ${getStoryAuthor(story) ? `<div class="story-author">by ${esc(formatAuthors(getStoryAuthor(story)))}</div>` : ''}
                 </div>
-                <p class="story-excerpt">${excerptText || 'No summary available.'}</p>
+                <p class="story-excerpt">${esc(excerptText || 'No summary available.')}</p>
                 <div class="story-meta">
-                    ${story.genre ? `<span class="meta-tag">${story.genre}</span>` : ''}
-                    ${story.year ? `<span class="meta-tag">${story.year}</span>` : ''}
+                    ${story.genre ? `<span class="meta-tag">${esc(story.genre)}</span>` : ''}
+                    ${story.year ? `<span class="meta-tag">${esc(story.year)}</span>` : ''}
                 </div>
                 <div class="similarity-badge">
                     <span class="similarity-value">${result ? (result.similarity * 100).toFixed(1) + '%' : ''}</span>
@@ -1451,7 +1447,7 @@ function createStoryCard(story, index) {
   card.innerHTML = '<div class="story-card-visual"><div class="story-card-overlay"><div class="story-card-overlay-header"><h3 class="story-title story-title-placeholder"></h3></div></div></div>';
 
   card.onclick = () => {
-    selectStory(story.id, { force: true, source: 'story-card' });
+    selectStory(story.id);
   };
 
   return card;
@@ -1470,7 +1466,7 @@ function renderSeriesGroupCard(card, group, index) {
     const coverStyle = coverSource
         ? `background-image:
                 linear-gradient(180deg, rgba(15, 23, 42, 0.12) 0%, rgba(15, 23, 42, 0.28) 40%, rgba(15, 23, 42, 0.9) 100%),
-                url('${coverSource}');`
+                url('${esc(coverSource)}');`
         : `background-image:
                 linear-gradient(180deg, rgba(15, 23, 42, 0.12) 0%, rgba(15, 23, 42, 0.28) 40%, rgba(15, 23, 42, 0.9) 100%),
                 linear-gradient(135deg, ${coverSeed.colors[0]}, ${coverSeed.colors[1]});`;
@@ -1487,8 +1483,8 @@ function renderSeriesGroupCard(card, group, index) {
                 <div class="story-group-top">
                     <div class="story-group-title-block">
                         <div class="story-kicker">Series</div>
-                        <h3 class="story-title">${group.title}</h3>
-                        ${group.author ? `<div class="story-author">by ${formatAuthors(group.author)}</div>` : ''}
+                        <h3 class="story-title">${esc(group.title)}</h3>
+                        ${group.author ? `<div class="story-author">by ${esc(formatAuthors(group.author))}</div>` : ''}
                     </div>
                     ${bestResult ? `
                         <div class="summary-stats">
@@ -1498,7 +1494,7 @@ function renderSeriesGroupCard(card, group, index) {
                     ` : ''}
                 </div>
                 <div class="story-group-primary">
-                    ${topMember ? `<span class="story-group-primary-label">Leading book</span><strong>${topMember.title}</strong>` : ''}
+                    ${topMember ? `<span class="story-group-primary-label">Leading book</span><strong>${esc(topMember.title)}</strong>` : ''}
                 </div>
                 <div class="story-group-footer">
                     <span class="story-group-count">${group.members.length} books in series</span>
@@ -1536,7 +1532,7 @@ function renderSeriesGroupCard(card, group, index) {
         const targetStoryId = topMember ? topMember.id : group.members[0]?.id;
         if (!targetStoryId) return;
 
-  selectStory(targetStoryId, { force: true, source: 'series-card' });
+  selectStory(targetStoryId);
   };
   card.classList.add('rendered');
 }
@@ -1553,7 +1549,10 @@ function createSeriesGroupCard(group, index) {
 
 function setupEventListeners() {
     searchBtn.addEventListener('click', performSearch);
-    searchInput.addEventListener('keypress', (e) => {
+    searchInput.addEventListener('input', () => {
+        if (!searchInput.value) clearSearch(); // the native clear button
+    });
+    searchInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') performSearch();
     });
 
@@ -1569,6 +1568,9 @@ function setupEventListeners() {
  closeSettingsModal();
  closeSeriesModal();
  deselectStory();
+ } else if (e.key === '/' && document.activeElement !== searchInput) {
+ e.preventDefault();
+ searchInput.focus();
  }
  });
 }
@@ -1607,7 +1609,7 @@ function setupModalListeners() {
 
 function refreshSeriesModalIfOpen() {
     if (!activeSeriesStoryId) return;
-    const story = allStories.find(item => item.id === activeSeriesStoryId);
+    const story = storyById.get(activeSeriesStoryId);
     if (story) {
         renderSeriesModal(story);
     }
@@ -1653,18 +1655,18 @@ function renderSeriesModal(story) {
     seriesModalBody.innerHTML = `
         <div class="series-modal-lead">
             <div class="series-modal-lead-label">Leading book</div>
-            <div class="series-modal-lead-title">${story.title}</div>
-            <div class="series-modal-lead-meta">${story.series_index ? `Book ${story.series_index}` : 'Book'} · ${leadScore}</div>
+            <div class="series-modal-lead-title">${esc(story.title)}</div>
+            <div class="series-modal-lead-meta">${story.series_index ? `Book ${esc(story.series_index)}` : 'Book'} · ${leadScore}</div>
         </div>
         <div class="series-modal-list">
             ${allSeriesStories.map(seriesStory => {
                 const result = currentResults.get(seriesStory.id);
                 const resultText = result ? `${(result.similarity * 100).toFixed(1)}% match` : '—';
                 return `
-                    <button type="button" class="series-modal-item ${seriesStory.id === story.id ? 'lead' : ''}" data-story-id="${seriesStory.id}">
+                    <button type="button" class="series-modal-item ${seriesStory.id === story.id ? 'lead' : ''}" data-story-id="${esc(seriesStory.id)}">
                         <div class="series-modal-item-main">
-                            <div class="series-modal-item-title">${seriesStory.title}</div>
-                            <div class="series-modal-item-meta">${seriesStory.series_index ? `Book ${seriesStory.series_index}` : 'Book'}</div>
+                            <div class="series-modal-item-title">${esc(seriesStory.title)}</div>
+                            <div class="series-modal-item-meta">${seriesStory.series_index ? `Book ${esc(seriesStory.series_index)}` : 'Book'}</div>
                         </div>
                         <div class="series-modal-item-score">${resultText}</div>
                     </button>
@@ -1678,7 +1680,7 @@ function renderSeriesModal(story) {
             const targetId = button.dataset.storyId;
             closeSeriesModal();
             if (targetId) {
-                selectStory(targetId, { force: true, source: 'series-modal' });
+                selectStory(targetId);
             }
         });
     });
@@ -1715,13 +1717,7 @@ function applySettings() {
  storyMotionStates.clear();
  renderStories(getVisibleCardStories());
  markGraphDirty();
-  if (librarySubtitle && allStories.length) {
-    const total = allStories.length.toLocaleString();
-    const showing = getVisibleCardStories().length.toLocaleString();
-    librarySubtitle.textContent = allStories.length > appSettings.maxCards
-      ? `Showing top ${showing} of ${total} books`
-      : `Browse ${total} books by semantic similarity`;
-  }
+  updateLibrarySubtitle();
   showStatus(`Settings applied — showing up to ${appSettings.maxCards} cards`, 'success');
   setTimeout(hideStatus, 2500);
 }
@@ -1732,216 +1728,83 @@ function resetSettings() {
 }
 
 async function performSearch() {
- const query = searchInput.value.trim();
- if (!query) {
- showStatus('⚠️ Please enter a search query', 'error');
- setTimeout(hideStatus, 2000);
- return;
- }
+    const query = searchInput.value.trim();
+    if (!query) {
+        clearSearch();
+        return;
+    }
 
- const speed = 'fast';
- const generation = ++searchGeneration;
+    searchController?.abort();
+    const controller = searchController = new AbortController();
 
- if (activeEventSource) {
- activeEventSource.close();
- activeEventSource = null;
- console.log('[SEARCH] Aborted previous search');
- }
+    progressContainer.classList.add('active');
+    progressFill.style.width = '35%';
+    progressText.textContent = 'Encoding query...';
+    showStatus('🔍 Encoding your query into embedding space...', 'info');
 
- console.log(`[SEARCH] Starting search for: "${query}"`);
+    try {
+        const response = await fetch(`${API_BASE}/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query }),
+            signal: controller.signal,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || response.statusText);
 
- progressContainer.classList.add('active');
- progressFill.style.width = '0%';
- progressText.textContent = 'Encoding query...';
- showStatus('🔍 Encoding your query into embedding space...', 'info');
-
- currentResults.clear();
- queryPosition = null;
- selectedStoryId = null;
- markGraphDirty();
- panOffsetX = 0;
- panOffsetY = 0;
- zoomLevel = 1;
- storyMotionStates.clear();
- originalPositions.forEach((pos, id) => storyPositions.set(id, { ...pos }));
- markGraphDirty();
-
- storyElements.forEach(card => {
- card.classList.remove('has-similarity', 'has-rank', 'selected', 'pulse');
- const rankBadge = card.querySelector('.rank-badge');
- if (rankBadge) {
- rankBadge.classList.remove('top-3', 'top-1');
- }
- const similarityValue = card.querySelector('.similarity-value');
- if (similarityValue) {
- similarityValue.textContent = '';
- }
- const similarityFill = card.querySelector('.similarity-bar-fill');
- if (similarityFill) {
- similarityFill.style.width = '0%';
- }
- });
- displayGroups.forEach(group => refreshGroupCardForStory(group.members[0].id));
-
- try {
- const url = `${API_BASE}/search/stream?query=${encodeURIComponent(query)}&speed=${speed}`;
- console.log(`[SEARCH] Connecting to: ${url}`);
-
- const es = new EventSource(url);
- activeEventSource = es;
-
- es.onopen = () => {
- if (generation !== searchGeneration) return;
- console.log('[SEARCH] EventSource connection opened');
- };
-
- es.onmessage = (event) => {
- if (generation !== searchGeneration) { es.close(); return; }
- try {
- const data = JSON.parse(event.data);
-
- if (data.type === 'query_position') {
- queryPosition = data.position;
- markGraphDirty();
- showStatus('📍 Query projected to embedding space', 'info');
- } else if (data.type === 'update') {
- handleStreamUpdate(data);
- } else if (data.type === 'complete') {
- handleStreamComplete(data);
- es.close();
- if (activeEventSource === es) activeEventSource = null;
- }
- } catch (parseError) {
- console.error('[SEARCH] Failed to parse event data:', parseError);
- }
- };
-
- es.onerror = () => {
- if (generation !== searchGeneration) return;
- console.error('[SEARCH] EventSource error');
- es.close();
- if (activeEventSource === es) activeEventSource = null;
- progressContainer.classList.remove('active');
- showStatus('❌ Search failed. Please try again.', 'error');
- };
-
- } catch (error) {
- console.error('[SEARCH] Search error:', error);
- progressContainer.classList.remove('active');
- showStatus('❌ Search failed. Please try again.', 'error');
- }
+        applySearchResults(data.results);
+        progressFill.style.width = '100%';
+        progressText.textContent = `✓ Ranked ${data.results.length.toLocaleString()} books`;
+        showStatus('✅ Search complete!', 'success');
+        setTimeout(hideStatus, 2000);
+    } catch (error) {
+        if (error.name === 'AbortError') return;
+        console.error('[SEARCH] Search error:', error);
+        showStatus(`❌ Search failed: ${error.message}`, 'error');
+    } finally {
+        if (searchController === controller) {
+            searchController = null;
+            setTimeout(() => progressContainer.classList.remove('active'), 1200);
+        }
+    }
 }
 
-function handleStreamUpdate(data) {
-    const { story, progress, processed, total } = data;
+function resetView() {
+    panOffsetX = 0;
+    panOffsetY = 0;
+    zoomLevel = 1;
+    storyMotionStates.clear();
+    if (selectedStoryId) deselectStory();
+}
 
-    progressFill.style.width = `${progress * 100}%`;
-    progressText.textContent = `Comparing: ${processed} of ${total} stories`;
+function applySearchResults(results) {
+    resetView();
+    currentResults = new Map(results.map(result => [result.id, result]));
+    topResults = results.slice(0, 10);
+    queryPosition = { x: 0, y: 0 }; // the query sits at the centre of the radial view
 
-    if (!story) return;
+    // The wave: best matches move first, and the whole library lands within ~1.2s.
+    const stagger = Math.min(4, 1200 / Math.max(results.length, 1));
+    results.forEach((result, index) => {
+        queueStoryPositionAnimation(result.id, result.radialPosition, index * stagger, 600);
+    });
 
-    // Store result
-    currentResults.set(story.id, story);
-
-    // Update positions
-    if (story.originalPosition) {
-        originalPositions.set(story.id, {
-            x: story.originalPosition.x,
-            y: story.originalPosition.y
-        });
-    }
-    if (story.radialPosition) {
-        radialPositions.set(story.id, {
-            x: story.radialPosition.x,
-            y: story.radialPosition.y
-        });
-    }
-
- const targetPosition = radialPositions.get(story.id);
- if (targetPosition) {
- queueStoryPositionAnimation(story.id, targetPosition);
- }
-
-    refreshGroupCardForStory(story.id);
+    renderStories(getVisibleCardStories());
     refreshSeriesModalIfOpen();
-
-    const card = storyElements.get(story.id);
-    if (card) {
-        card.classList.add('pulse');
-        setTimeout(() => card.classList.remove('pulse'), 1000);
-    }
-
-  reorderCards();
-  markGraphDirty();
+    updateLibrarySubtitle();
+    markGraphDirty();
 }
 
-function reorderCards() {
-  const sortedGroups = [...displayGroups].sort((a, b) => {
-        const aValue = getGroupSortValue(a);
-        const bValue = getGroupSortValue(b);
-        if (aValue !== bValue) {
-            return bValue - aValue;
-        }
-        return a.firstIndex - b.firstIndex;
-    });
-
-    sortedGroups.forEach((group, index) => {
-        const card = groupElements.get(group.id);
-        if (card) {
-            card.style.order = index;
-        }
-    });
+function clearSearch() {
+    searchController?.abort();
+    if (!queryPosition) return;
+    resetView();
+    currentResults = new Map();
+    topResults = [];
+    queryPosition = null;
+    originalPositions.forEach((pos, id) => queueStoryPositionAnimation(id, pos, 0, 500));
+    renderStories(getVisibleCardStories());
+    refreshSeriesModalIfOpen();
+    updateLibrarySubtitle();
+    markGraphDirty();
 }
-
-function handleStreamComplete(data) {
-    console.log('[SEARCH] Search complete:', data);
-
-    progressFill.style.width = '100%';
-    progressText.textContent = '✓ Search complete!';
-    showStatus('✅ Search complete!', 'success');
-
-    setTimeout(() => {
-        progressContainer.classList.remove('active');
-        hideStatus();
-    }, 2500);
-
-    const sortedResults = data.results.sort((a, b) => b.similarity - a.similarity);
-
-    sortedResults.forEach((story, index) => {
-        currentResults.set(story.id, { ...story, rank: index + 1 });
-
-        // Update positions from final data
-        if (story.originalPosition) {
-            originalPositions.set(story.id, {
-                x: story.originalPosition.x,
-                y: story.originalPosition.y
-            });
-        }
-        if (story.radialPosition) {
-            radialPositions.set(story.id, {
-                x: story.radialPosition.x,
-                y: story.radialPosition.y
-            });
-        }
-
-    });
-
-  displayGroups.forEach(group => refreshGroupCardForStory(group.members[0].id));
- reorderCards();
- refreshSeriesModalIfOpen();
-  if (librarySubtitle && allStories.length) {
-    const total = allStories.length.toLocaleString();
-    const showing = getVisibleCardStories().length.toLocaleString();
-    librarySubtitle.textContent = allStories.length > appSettings.maxCards
-      ? `Showing top ${showing} of ${total} books`
-      : `Browse ${total} books by semantic similarity`;
-  }
-
-  // Set query position
-  if (data.query_position) {
-    console.log('[SEARCH] Final query position:', data.query_position);
- queryPosition = data.query_position;
- markGraphDirty();
- }
-
- }

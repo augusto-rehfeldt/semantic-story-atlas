@@ -1,22 +1,20 @@
-# Semantic Story Atlas
+# Shelfscape
 
-Semantic Story Atlas is a Flask + vanilla JavaScript app for exploring a text collection with embeddings. It indexes `.txt` and `.csv` content, projects embeddings into 2D, and lets you search the library with natural-language queries while the results animate in the UI.
+Shelfscape (formerly Semantic Story Atlas) is a Flask + vanilla JavaScript app for exploring a text collection with embeddings. It indexes `.txt` and `.csv` content, projects embeddings into 2D, and lets you search the library with natural-language queries while the results animate in the UI.
 
 ## What it does
 
 - Indexes your text collection into embeddings
 - Projects stories into 2D for visualization
 - Searches by semantic similarity using a natural-language query
-- Shows results in two modes:
-  - Radial view, ranked by similarity
-  - Fixed view, based on embedding-space position
+- Shows the library as a 2D map; a search moves every book into similarity rings around the query, best matches first
 - Supports series-aware grouping and story detail cards
-- Streams search updates for the animated “wave” effect in the UI
+- Press `/` to focus the search box; clearing it returns to the map view
 
 ## Repository layout
 
 ```text
-semantic-story-atlas/
+shelfscape/
 ├── backend/
 │   ├── app.py          # Flask server and API routes
 │   └── embeddings.py   # Loading, caching, embedding, and projection logic
@@ -155,16 +153,16 @@ The backend currently exposes:
 
 - `GET /` — frontend
 - `GET /api/health` — health check
-- `GET /api/stories` — all indexed stories
-- `GET /api/story/<story_id>` — one story
+- `GET /api/stories` — all indexed stories with 2D positions and a short excerpt
+- `GET /api/story/<story_id>` — one story, with its full summary
 - `GET /api/story/<story_id>/cover` — story cover lookup
 - `GET /api/covers/<filename>` — cover image from `stories/covers/`
-- `POST /api/search` — non-streaming semantic search
-- `GET /api/search/stream?query=...&speed=slow|normal|fast` — streamed search updates
+- `POST /api/search` with `{"query": "..."}` — every story ranked best first as `{id, similarity, rank, radialPosition}`
 
 ## Caches
 
-The backend writes embedding and projection caches under `backend/`.
+The backend writes embedding (`.npz`) and projection (`.json`) caches under `backend/`.
+An older JSON embedding cache is converted on first start.
 They are keyed by provider/model so different embedding setups do not overwrite each other.
 If you change your dataset and want a clean rebuild, delete the cache files and restart the server.
 

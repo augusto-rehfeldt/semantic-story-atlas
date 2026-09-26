@@ -1,11 +1,12 @@
-<!-- frontend/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Semantic Story Atlas</title>
+    <title>Shelfscape</title>
+    <meta name="description" content="Map and search a book library by meaning.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
     <link rel="stylesheet" href="styles.css">
     <link
         href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Inter:wght@300;400;500;600&display=swap"
@@ -14,7 +15,7 @@
 
 <body>
     <!-- Status Message Banner -->
-    <div class="status-message" id="statusMessage"></div>
+    <div class="status-message" id="statusMessage" role="status" aria-live="polite"></div>
 
     <div class="app-container">
         <!-- Left Panel: Graph -->
@@ -52,15 +53,15 @@
         <!-- Right Panel: Search & Results -->
         <div class="main-panel">
   <header>
-    <h1>📚 Semantic Story Atlas</h1>
+    <h1>Shelfscape</h1>
     <p class="subtitle" id="librarySubtitle">Loading stories...</p>
     <button class="settings-toggle-btn" id="settingsToggleBtn" type="button" aria-label="Open settings">⚙️</button>
   </header>
 
             <div class="search-container">
     <div class="search-box">
-      <input type="text" id="searchInput" placeholder="Describe what kind of story you're looking for..." autocomplete="off">
-      <button id="searchBtn">
+      <input type="search" id="searchInput" placeholder="Describe the kind of book you want…  (press / to focus)" aria-label="Search the library by meaning" autocomplete="off">
+      <button id="searchBtn" type="button">
         <span class="search-icon">🔍</span>
         <span class="search-text">Search</span>
       </button>
@@ -75,7 +76,7 @@
                 </div>
             </div>
 
-            <div class="progress-container" id="progressContainer">
+            <div class="progress-container" id="progressContainer" role="status" aria-live="polite">
                 <div class="progress-bar">
                     <div class="progress-fill" id="progressFill"></div>
                 </div>

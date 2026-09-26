@@ -1,4 +1,4 @@
-# Semantic Story Atlas
+# Shelfscape (formerly Semantic Story Atlas)
 
 ## What This Is
 Flask + vanilla JS: embeddings index of a text collection, 2D projection, natural-language search with animated results.
@@ -17,6 +17,13 @@ Flask + vanilla JS: embeddings index of a text collection, 2D projection, natura
 - Hash embedding inputs per record and fingerprint projections by ordered dataset.
 - `--stories` selects a collection; never combine exports with an existing collection implicitly.
 - Check: `python -B -m unittest -q test_cache` (no model/network needed).
+- Embedding vectors are cached as float32 `.npz` (keys + matrix); a legacy JSON cache of the same
+  stem is converted once, then deleted. The cache is only rewritten when its key set changes.
+- Warm boot never fits UMAP: cached positions are used as-is. The query is drawn at the centre of
+  the radial view, so it is never projected (no fitted reducer is kept).
+- `/api/stories` ships a short plain `excerpt`, not the summary; `/api/story/<id>` has the full one.
+- `/api/search` returns every story as `{id, similarity, rank, radialPosition}`, best first; the
+  frontend animates the wave itself. Frontend interpolates data into HTML only through `esc()`.
 
 ## Embeddings providers
 

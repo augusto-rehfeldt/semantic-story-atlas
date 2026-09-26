@@ -98,9 +98,33 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             self.assertEqual(manager.story_keys, ['library-2', 'replacement'])
             self.assertTrue(np.isfinite(manager.projections_2d).all())
-            np.testing.assert_allclose(manager.project_query(manager.embeddings_matrix[0]), manager.projections_2d[0])
+            with patch.object(manager, '_encode_query', return_value=manager.embeddings_matrix[1]):
+                ranked = manager.search('anything')
+            self.assertEqual([r['id'] for r in ranked][0], 'replacement')
+            self.assertEqual([r['rank'] for r in ranked], [1, 2])
+            cache = root / 'embeddings.npz'
+            stamp = cache.stat().st_mtime_ns
+            load(list(reversed(rows)))
+            self.assertEqual(cache.stat().st_mtime_ns, stamp)  # nothing new: cache not rewritten
             self.assertEqual(load(rows[:1]).projections_2d.tolist(), [[0.0, 0.0]])
             self.assertEqual(load([]).get_all_stories(), [])
+
+    def test_legacy_json_cache_converts_without_reencoding(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'stories').mkdir()
+            manager = module.EmbeddingsManager(str(root / 'stories'), str(root / 'embeddings.json'), str(root / 'p.json'))
+            (root / 'embeddings.json').write_text(json.dumps({'k': {'embedding': [1.0, 2.0], 'title': 'T'}}))
+            with patch.object(manager, '_emit_status'):
+                cache = manager._load_cache()
+                manager._save_cache(cache)
+                self.assertFalse((root / 'embeddings.json').exists())
+                self.assertEqual(manager._load_cache()['k'].tolist(), [1.0, 2.0])
+
+    def test_radial_layout_puts_every_band_on_its_ring(self):
+        sims = np.array([0.95, 0.91, 0.55, 0.05, -0.3])
+        radii = np.hypot(*module.radial_layout(sims).T)
+        np.testing.assert_allclose(radii, [0.08, 0.08 + 0.03 * np.sin(2.5), 0.48, 0.96, 0.96 + 0.03 * np.sin(2.5)])
 
 
 if __name__ == '__main__':

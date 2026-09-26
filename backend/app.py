@@ -1,8 +1,6 @@
-print("Booting Story Atlas backend...")
+print("Booting Shelfscape backend...")
 
 import os
-import json
-import time
 import threading
 import logging
 from datetime import datetime
@@ -17,7 +15,7 @@ for _line in (_env.read_text(encoding="utf-8").splitlines() if _env.exists() els
         _value = _value[1:-1]
     if _sep and _key.strip() and not _key.startswith("#"):
         os.environ.setdefault(_key.strip(), _value)
-from flask import Flask, jsonify, request, Response, stream_with_context, send_from_directory, send_file
+from flask import Flask, jsonify, request, send_from_directory, send_file
 from embeddings import EmbeddingsManager, build_cache_stem
 
 
@@ -122,7 +120,6 @@ def ensure_story_loading_started():
         _load_thread.start()
 
 
-print(f"[{datetime.now().strftime('%H:%M:%S')}][BOOT] Boot complete. Stories will load on first request.")
 
 
 @app.route("/")
@@ -194,7 +191,8 @@ def get_story_cover(story_id):
 
 @app.route("/api/search", methods=["POST"])
 def search():
-    """Search stories by query (non-streaming)."""
+    """Rank every story against a query: id, similarity, rank and radial position, best first.
+    Titles and metadata are already on the client from /api/stories."""
     ensure_story_loading_started()
     if not embeddings_manager.is_ready:
         return jsonify(
@@ -204,66 +202,10 @@ def search():
                 "stories_loaded": len(embeddings_manager.stories),
             }
         ), 503
-    data = request.get_json()
-    query = data.get("query", "")
-
+    query = ((request.get_json(silent=True) or {}).get("query") or "").strip()
     if not query:
         return jsonify({"error": "Query is required"}), 400
-
-    results = embeddings_manager.compute_similarity(query)
-
-    formatted_results = []
-    for idx, (story_id, similarity) in enumerate(results):
-        story = embeddings_manager.stories[story_id]
-        result = {
-            "id": story_id,
-            "title": story["title"],
-            "content": story["content"][:200] + "...",
-            "similarity": similarity,
-            "position": embeddings_manager._get_story_position(story_id),
-            "rank": idx + 1,
-        }
-        result.update(embeddings_manager._story_metadata(story_id))
-        formatted_results.append(result)
-
-    return jsonify({"query": query, "results": formatted_results})
-
-
-@app.route("/api/search/stream", methods=["GET"])
-def search_stream():
-    """Stream search results for wave effect."""
-    ensure_story_loading_started()
-    if not embeddings_manager.is_ready:
-        return jsonify(
-            {
-                "error": "Stories are still loading",
-                "loading": embeddings_manager.is_loading,
-                "stories_loaded": len(embeddings_manager.stories),
-            }
-        ), 503
-    query = request.args.get("query", "")
-    speed = request.args.get("speed", "normal")
-
-    if not query:
-        return jsonify({"error": "Query is required"}), 400
-
-    delays = {"slow": 0.15, "normal": 0.08, "fast": 0.03}
-    delay = delays.get(speed, 0.08)
-
-    def generate():
-        for update in embeddings_manager.compute_similarity_streaming(query):
-            time.sleep(delay)
-            yield f"data: {json.dumps(update)}\n\n"
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return jsonify({"query": query, "results": embeddings_manager.search(query)})
 
 
 @app.route("/api/story/<story_id>", methods=["GET"])
@@ -322,4 +264,5 @@ if __name__ == "__main__":
         port += 1
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}][BOOT] Starting server on port {port}")
-    app.run(debug=True, port=port, threaded=True, use_reloader=False)
+    ensure_story_loading_started()  # index while the browser opens, not on its first request
+    app.run(port=port, threaded=True)

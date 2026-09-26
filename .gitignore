@@ -9,6 +9,7 @@ build/
 
 # Caches (regenerated automatically)
 **/embeddings_cache*.json
+**/embeddings_cache*.npz
 **/projection_cache*.json
 
 # Model cache (downloaded automatically)

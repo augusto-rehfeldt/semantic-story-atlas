@@ -319,6 +319,37 @@ body {
     font-size: 0.84rem;
 }
 
+.summary-excerpt h4 {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    margin: 0.9rem 0 0.35rem;
+}
+
+.summary-excerpt h4:first-child {
+    margin-top: 0;
+}
+
+.summary-excerpt p + p {
+    margin-top: 0.6rem;
+}
+
+.summary-excerpt strong {
+    color: var(--text-primary);
+}
+
+#searchInput:focus-visible,
+button:focus-visible {
+    outline: 2px solid var(--secondary-color);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
 .summary-body {
     min-height: 0;
     flex: 1;
