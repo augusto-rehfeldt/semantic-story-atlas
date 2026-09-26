@@ -11,28 +11,30 @@ from typing import List, Dict, Tuple, Optional
 import threading
 
 # LM Studio (and any OpenAI-compatible /embeddings endpoint) is reached through
-# book writer's shared AI suite, like every AI call in the workspace. The local
-# sentence-transformers path runs in-process and needs no provider at all.
-BOOK_WRITER = os.environ.get("ATLAS_BOOK_WRITER") or os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "book writer")
+# the shared ai-suite package, like every AI call in the workspace: the sibling
+# checkout when present (AI_SUITE_DIR overrides it), else the copy vendored into this
+# repository. The local sentence-transformers path needs no provider at all.
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+AI_SUITE = os.environ.get("AI_SUITE_DIR") or os.path.join(os.path.dirname(_REPO), "ai-suite")
+SUITE_PATH = AI_SUITE if os.path.isdir(AI_SUITE) else _REPO
 
 
-def _book_writer_ai_service():
+def _suite_service_module():
     import sys
-    if BOOK_WRITER not in sys.path:
-        sys.path.insert(0, BOOK_WRITER)
-    from ai_book_creator.services import ai_service
-    return ai_service
+    if SUITE_PATH not in sys.path:
+        sys.path.insert(0, SUITE_PATH)
+    from ai_suite import service
+    return service
 
 
 def shared_embedding_service(base_url: str, api_key: str, model_name: str):
-    """book writer's AIService pointed at an OpenAI-compatible embeddings endpoint."""
+    """The shared AIService pointed at an OpenAI-compatible embeddings endpoint."""
     state = tempfile.gettempdir()
     overrides = {
         "provider": "openrouter", "base_url": base_url, "api_key": api_key, "writing_model": model_name,
         "groq_rate_state_path": os.path.join(state, "story_atlas_groq.json"),
     }
-    return _book_writer_ai_service().AIService(
+    return _suite_service_module().AIService(
         None, os.path.join(state, "story_atlas_ai_usage.json"), allow_auth_prompt=False,
         client_max_retries=2, config_overrides=overrides)
 

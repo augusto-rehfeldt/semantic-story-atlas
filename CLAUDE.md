@@ -21,5 +21,6 @@ Flask + vanilla JS: embeddings index of a text collection, 2D projection, natura
 ## Embeddings providers
 
 - `sentence_transformers` runs in-process. `lm_studio` (any OpenAI-compatible `/embeddings`)
-  goes through book writer's shared AIService (`shared_embedding_service()`, `AIService.embed`;
-  sibling `book writer` folder or `ATLAS_BOOK_WRITER`) — no provider client of its own.
+  goes through the shared ai-suite AIService (`shared_embedding_service()`, `AIService.embed`;
+  sibling `ai-suite` checkout or `AI_SUITE_DIR`, else the vendored `ai_suite/` copy synced by
+  ai-suite's `sync.py` -- never edit it here) — no provider client of its own.

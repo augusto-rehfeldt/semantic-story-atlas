@@ -14,7 +14,7 @@ with patch.dict(sys.modules, {'umap': None}):
 
 
 class SharedSuiteTests(unittest.TestCase):
-    """LM Studio embeddings run on book writer's shared AIService, not a client of our own."""
+    """LM Studio embeddings run on the shared ai-suite AIService, not a client of our own."""
 
     def manager(self, folder):
         return module.EmbeddingsManager(stories_folder=folder, embedding_provider="lm_studio",
@@ -41,7 +41,7 @@ class SharedSuiteTests(unittest.TestCase):
     def test_shared_embedding_service_is_book_writers(self):
         built = []
         fake = type("M", (), {"AIService": lambda *a, **k: built.append((a, k)) or "svc"})
-        with patch.object(module, "_book_writer_ai_service", return_value=fake):
+        with patch.object(module, "_suite_service_module", return_value=fake):
             self.assertEqual(module.shared_embedding_service("http://h/v1", "k", "m"), "svc")
         args, kwargs = built[0]
         self.assertIsNone(args[0])
